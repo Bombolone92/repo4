@@ -1,0 +1,164 @@
+> 翻译自 [English version](/channel-discord)
+
+# Discord Channel
+
+通过 Discord Gateway API 集成 Discord bot。支持 DM、服务器、线程和通过消息编辑实现的流式响应。
+
+## 设置
+
+**创建 Discord 应用：**
+1. 前往 https://discord.com/developers/applications
+2. 点击"New Application"
+3. 进入"Bot"标签 → "Add Bot"
+4. 复制 token
+5. 确保在"Privileged Gateway Intents"下启用了 `Message Content Intent`
+
+**将 Bot 添加到服务器：**
+1. OAuth2 → URL Generator
+2. 选择 scopes：`bot`
+3. 选择权限：`Send Messages`、`Read Message History`、`Read Messages/View Channels`
+4. 复制生成的 URL 并在浏览器中打开
+
+**启用 Discord：**
+
+```json
+{
+  "channels": {
+    "discord": {
+      "enabled": true,
+      "token": "YOUR_BOT_TOKEN",
+      "dm_policy": "open",
+      "group_policy": "open",
+      "allow_from": ["alice_id", "bob_id"]
+    }
+  }
+}
+```
+
+## 配置
+
+所有配置项位于 `channels.discord`：
+
+| 配置项 | 类型 | 默认值 | 说明 |
+|-----|------|---------|-------------|
+| `enabled` | bool | false | 启用/禁用 channel |
+| `token` | string | 必填 | 来自 Discord 开发者门户的 bot token |
+| `allow_from` | list | -- | 用户 ID 白名单 |
+| `dm_policy` | string | `"open"` | `open`、`allowlist`、`pairing`、`disabled` |
+| `group_policy` | string | `"open"` | `open`、`allowlist`、`disabled` |
+| `require_mention` | bool | true | 服务器（channel）中是否需要 @bot 提及 |
+| `history_limit` | int | 50 | 每个 channel 的待处理消息数（0=禁用） |
+| `block_reply` | bool | -- | 覆盖 gateway block_reply（nil=继承） |
+| `chat_behavior` | object | -- | 覆盖此 channel 的 gateway [拟人化投递](/channels-overview#human-like-delivery)（nil = 继承） |
+
+## 功能特性
+
+### Gateway Intents
+
+启动时自动请求 `GuildMessages`、`DirectMessages` 和 `MessageContent` intents。
+
+### 消息长度限制
+
+Discord 每条消息限制 2,000 字符。超出长度的响应会在换行处分割。
+
+### 占位符编辑
+
+Bot 立即发送"Thinking..."占位符，然后用实际响应编辑它。在 agent 处理期间提供视觉反馈。
+
+```mermaid
+flowchart TD
+    SEND["发送 'Thinking...'<br/>占位符"]
+    SEND --> PROCESS["Agent 处理<br/>并流式分块"]
+    PROCESS --> EDIT["编辑消息<br/>为响应内容"]
+    EDIT --> DONE["响应完成"]
+```
+
+### 提及过滤
+
+在服务器（channel）中，bot 默认需要被提及才会响应（`require_mention: true`）。待处理消息存入历史缓冲区。当 bot 被提及时，历史记录作为上下文包含。
+
+**群组 @mention 检测：** 当 Discord 事件的 `mentions` 数组中包含 bot 的用户 ID 时，或者当消息是直接回复 bot 自己发送的消息时，该消息被视为 @mention。两个条件均在执行任何 policy 或 pairing 逻辑之前进行检查。
+
+**群组中的 pairing 回复：** 当设置了 `group_policy: "pairing"` 且 `require_mention: true`（默认值）时，bot 只在用户明确 @mention bot（或回复 bot 的消息）时，才向未配对用户发送配对邀请。未向 bot 寻址的消息会被静默添加到群组历史缓冲区，不会触发 pairing 回复。设置 `require_mention: false` 可在群组中无条件发送配对邀请（不建议用于公开服务器）。
+
+### Typing 指示器
+
+Agent 处理期间显示 typing 指示器（9 秒保活）。消息成功投递后，typing 指示器自动停止。
+
+### 线程支持
+
+Bot 自动检测并在 Discord 线程中响应。响应保持在同一线程中。
+
+### 线程历史回填
+
+当 bot 在 **Discord 线程内**被提及时，GoClaw 会在回答前拉取最近的线程上下文 — 这样线程中途的提及不会被盲目作答。
+
+- 通过 Discord REST API 获取触发消息之前的最多 **25** 条线程消息，并将它们的文本作为上下文前置。
+- 将最多 **15** 个之前的附件下载到入站媒体管道，每个文件上限 **5 MB**。
+- 整个回填受 **30 秒**超时约束。
+
+这是**仅限线程**的。如果 bot 缺少 `READ_MESSAGE_HISTORY` 权限或 REST 调用失败，GoClaw 会优雅地回退为只用当前消息。
+
+### 多文件投递
+
+Discord 在**单条消息**中投递多个文件（外加可选文本），最多 10 个附件 — 因此一次批量 `send_file` 会落地为一条整洁的消息，而非一连串刷屏。参见概览中的 [多附件投递](/channels-overview#multi-attachment-delivery-batching)。
+
+### 回复消息中的媒体
+
+当用户回复包含媒体附件的消息时，GoClaw 提取这些附件并包含在入站消息上下文中。即使媒体在上一轮分享，agent 也能看到和处理。附件源 URL 在 media tag 中得到保留，agent 可引用 Discord CDN 上的原始 URL。
+
+### 群组媒体历史
+
+群组会话中发送的媒体文件（图片、视频、音频）会在消息历史中追踪，允许 agent 引用之前分享的媒体。
+
+### Bot 身份
+
+启动时，bot 通过 `@me` 端点获取自己的用户 ID，以避免响应自己的消息。
+
+### Allowlist 与 Pairing 策略
+
+`dm_policy` 和 `group_policy` 的行为与文档描述一致 — `pairing`、`allowlist` 和 `open` 模式完全由策略评估层处理。策略检查之后不存在额外的 allowlist 门控，因此当同时配置了 `allow_from` 列表时，已 pairing 的用户不会被错误拒绝。若用户既已 pairing 又出现在 `allow_from` 中，两个条件均满足，消息正常处理。
+
+### 群组文件 Writer 管理
+
+Discord 支持基于斜杠命令管理群组文件 writer（类似 Telegram 的 writer 限制）。在服务器 channel 中，写入敏感操作可限制为指定 writer：
+
+| 命令 | 说明 |
+|---------|-------------|
+| `/addwriter` | 添加群组文件 writer（回复目标用户） |
+| `/removewriter` | 移除群组文件 writer |
+| `/writers` | 列出当前群组文件 writer |
+
+Writer 按群组管理。内部使用的群组 ID 格式为 `group:discord:{channelID}`。
+
+## 常用模式
+
+### 发送到 Channel
+
+```go
+manager.SendToChannel(ctx, "discord", "channel_id", "Hello!")
+```
+
+### 群组配置
+
+Discord channel 实现暂不支持按 guild/channel 覆盖配置。使用全局 `allow_from` 和策略设置。
+
+## 故障排查
+
+| 问题 | 解决方案 |
+|-------|----------|
+| Bot 不响应 | 检查 bot 是否有必要权限。验证 `require_mention` 设置。确保 bot 可以读取消息（已启用 `Message Content Intent`）。 |
+| "Unknown Application"错误 | Token 无效或已过期。重新生成 bot token。 |
+| 占位符编辑失败 | 确保 bot 有 `Manage Messages` 权限。Discord 可能在设置期间撤销此权限。 |
+| 消息分割不正确 | 长响应在换行处分割。通过模型 `max_tokens` 控制消息长度。 |
+| Bot 提及自己 | 检查 Discord 权限。Bot 响应中不应包含 `@everyone` 或 `@here`。 |
+| 线程上下文缺失 | 线程历史回填需要 `READ_MESSAGE_HISTORY`。授予该权限；仅在线程内生效。 |
+
+## 下一步
+
+- [概览](/channels-overview) — Channel 概念和策略
+- [Telegram](/channel-telegram) — Telegram bot 设置
+- [Larksuite](/channel-feishu) — Larksuite 流式卡片集成
+- [Browser Pairing](/channel-browser-pairing) — 配对流程
+
+<!-- goclaw-source: fabe86b3 | 更新: 2026-06-28 -->

@@ -1,0 +1,113 @@
+{
+  "name": "skillx-marketplace",
+  "owner": {
+    "name": "SkillX.sh"
+  },
+  "metadata": {
+    "description": "AI agent skills marketplace — search, install, and use skills for Claude Code",
+    "version": "1.0.0",
+    "pluginRoot": "./.claude/skills"
+  },
+  "plugins": [
+    {
+      "name": "skill-creator",
+      "source": "./.claude/skills/skill-creator",
+      "description": "Create or update Claude skills optimized for Skillmark benchmarks. Use for new skills, skill scripts, references, benchmark optimization, extending Claude's capabilities. Adapted from Anthropic's Apache-2.0 skill-creator skill.",
+      "version": "3.0.0",
+      "author": {
+        "name": "SkillX.sh"
+      },
+      "homepage": "https://skillx.sh",
+      "repository": "https://github.com/nextlevelbuilder/skillx",
+      "license": "Apache-2.0",
+      "keywords": [
+        "skills",
+        "creator",
+        "benchmark",
+        "skillmark",
+        "claude-code"
+      ],
+      "category": "developer-tools",
+      "tags": [
+        "skill-creation",
+        "progressive-disclosure",
+        "benchmark-optimization"
+      ]
+    },
+    {
+      "name": "skillx",
+      "source": "./plugins/skillx",
+      "description": "Find, compare and vet AI agent skills from the SkillX.sh catalog, then load or install one only after you approve it.",
+      "version": "2.0.0",
+      "author": {
+        "name": "SkillX.sh"
+      },
+      "homepage": "https://skillx.sh",
+      "repository": "https://github.com/nextlevelbuilder/skillx",
+      "license": "MIT",
+      "keywords": [
+        "skills",
+        "skill-discovery",
+        "agent-skills",
+        "marketplace",
+        "skillx"
+      ],
+      "category": "developer-tools",
+      "tags": [
+        "skill-search",
+        "skill-vetting",
+        "marketplace-cli"
+      ]
+    },
+    {
+      "name": "hol-guard",
+      "source": "./.claude/skills/hol-guard",
+      "description": "Protect local AI coding harnesses with HOL Guard runtime safety, approvals, audit receipts, and package scanning.",
+      "version": "1.0.0",
+      "author": {
+        "name": "Hashgraph Online"
+      },
+      "homepage": "https://hol.org/guard",
+      "repository": "https://github.com/hashgraph-online/hol-guard",
+      "license": "Apache-2.0",
+      "keywords": [
+        "security",
+        "ai-safety",
+        "runtime-protection",
+        "agent-security",
+        "hol-guard"
+      ],
+      "category": "developer-tools",
+      "tags": [
+        "runtime-safety",
+        "prompt-injection",
+        "supply-chain-security"
+      ]
+    },
+    {
+      "name": "marketing-mindset",
+      "source": "./.claude/skills/marketing-mindset",
+      "description": "A marketer's operating mindset for growth and client acquisition: test volume floors, channel kill rules, positioning, offers, and cold outreach for first clients.",
+      "version": "0.3.0",
+      "author": {
+        "name": "Axel Freeman (axelfreeman)"
+      },
+      "homepage": "https://github.com/axelfreeman/marketing-mindset",
+      "repository": "https://github.com/axelfreeman/marketing-mindset",
+      "license": "MIT",
+      "keywords": [
+        "marketing",
+        "growth",
+        "positioning",
+        "cold-outreach",
+        "client-acquisition"
+      ],
+      "category": "marketing",
+      "tags": [
+        "marketing-mindset",
+        "go-to-market",
+        "offer-design"
+      ]
+    }
+  ]
+}

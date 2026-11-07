@@ -1,0 +1,435 @@
+> 翻译自 [English version](/tools-overview)
+
+# 工具概览
+
+> Agent 可以使用的 50+ 内置工具，按类别组织。
+
+## 概述
+
+工具是 agent 在生成文本之外与世界交互的方式。Agent 可以搜索网页、读取文件、运行代码、查询记忆、通过 agent 团队协作等。GoClaw 包含 50+ 内置工具（可通过 MCP 和每 agent 的自定义工具扩展），分为 14 个类别。
+
+## 工具类别
+
+| 类别 | 工具 | 功能 |
+|------|------|------|
+| **文件系统** (`group:fs`) | read_file, write_file, edit, list_files, search, glob, send_file | 在 agent 工作空间中读、写、编辑和搜索文件；`send_file` 将已存在的文件以附件形式投递 |
+| **运行时** (`group:runtime`) | exec, credentialed_exec | 运行 shell 命令；以注入凭证执行 CLI 工具 |
+| **Web** (`group:web`) | web_search, web_fetch | 搜索网页（Exa、Tavily、Brave、DuckDuckGo）并抓取页面 |
+| **记忆** (`group:memory`) | memory_search, memory_get, memory_expand | 查询长期记忆（混合向量 + FTS 搜索）；按 ID 展开完整 episodic 内容（L2 检索） |
+| **知识** (`group:knowledge`) | vault_search, knowledge_graph_search, skill_search | 跨 vault/memory/知识图谱的统一搜索；搜索实体和关系；发现 skills |
+| **Vault** (`group:vault`) | vault_search, vault_read | 搜索和读取 vault 文档；适用 `group:vault` 策略组 |
+| **Sessions** (`group:sessions`) | sessions_list, sessions_history, sessions_send, session_status, spawn | 管理对话 session；生成子 agent |
+| **团队** (`group:teams`) | team_tasks, team_message | 通过共享任务板和邮箱与 agent 团队协作 |
+| **自动化** (`group:automation`) | cron, datetime, wait | 调度定期任务；获取当前日期/时间；在工具调用之间暂停执行（`wait` —— 详见下文） |
+| **消息传递** (`group:messaging`) | message, create_forum_topic | 发送消息；创建 Telegram 论坛话题 |
+| **媒体生成** (`group:media_gen`) | create_image, create_image_byteplus, create_audio, create_video, create_video_byteplus, tts, image_generation | 生成图片、音频、视频和文字转语音；`image_generation` 是 Codex/OpenAI-compat 的原生工具（三级开关：provider 能力 + `other_config.allow_image_generation` + header `x-goclaw-no-image-gen`）——参见[媒体生成](/zh/advanced/media-generation) |
+| **浏览器** | browser | 导航网页、截图、与元素交互 |
+| **媒体读取** (`group:media_read`) | read_image, read_audio, read_document, read_video | 分析图片（文件、附件或 URL）、转录音频、提取文档（PDF、DOCX、图片；可选通过 pdftotext/pandoc 的 local-first 提取）、分析视频（文件或 URL）— 参见 [Media Generation](/advanced/media-generation) |
+| **Skills** (`group:skills`) | use_skill, publish_skill | 调用和发布 skills |
+| **工作空间** | workspace_dir | 解析团队/用户上下文的工作空间目录 |
+| **AI** | openai_compat_call | 以自定义请求格式调用 OpenAI 兼容端点 |
+
+### web_search 提供商
+
+`web_search` 支持四个提供商，按顺序尝试：
+
+| 提供商 | 说明 |
+|--------|------|
+| **Exa** | 需要 `EXA_API_KEY` |
+| **Tavily** | 需要 `TAVILY_API_KEY` |
+| **Brave** | 需要 `BRAVE_API_KEY` |
+| **DuckDuckGo** | 免费 fallback — 当其他提供商无 API key 时最后使用 |
+
+> **重大变更（v3.2+）：** `config.json5 tools.web.*` 已移除。配置现在仅限租户级别。现有密钥在首次启动时自动迁移（数据钩子 055）。
+
+通过仪表盘（**Config → Tools → Web Search**）或 API 配置 `web_search`：
+
+```bash
+# 通过 tenant-config API 设置提供商顺序
+PUT /v1/tools/builtin/web_search/tenant-config
+{
+  "provider_order": ["exa", "tavily", "brave", "duckduckgo"],
+  "brave": { "enabled": true, "max_results": 5 },
+  "exa": { "enabled": false }
+}
+```
+
+DuckDuckGo 不需要 API key，始终作为最终 fallback 可用——无法禁用。
+
+### V3 记忆与 Vault 新工具
+
+**记忆分层**（v3 两级检索）：
+
+| 工具 | 层级 | 描述 |
+|------|------|------|
+| `memory_search` | L1 | BM25 + 向量混合搜索；返回摘要和评分 |
+| `memory_expand` | L2 | 按 ID 加载完整 episodic 摘要（来自 `memory_search` 结果） |
+
+先用 `memory_search` 发现相关 episodic ID，再用 `memory_expand` 获取完整内容。仅需少量条目时节省 token。
+
+**Vault 链接**现在由 enrichment pipeline 自动处理。参见 [Knowledge Vault](../../advanced/knowledge-vault.md)。
+
+> `vault_link` 和 `vault_backlinks` 已移除。显式 wikilink 创建和反向链接追踪不再需要 — enrichment pipeline 自动管理文档关系。
+
+**BytePlus 媒体工具**（`create_image_byteplus`、`create_video_byteplus`）在配置 `byteplus` provider 后自动可用。两者均采用异步 job 轮询：通过 Seedream 生成图片会在任务完成后返回 URL；通过 Seedance 生成视频则轮询 `/text-to-video-pro/status/{id}` 获取结果。
+
+> 额外工具如 `mcp_tool_search` 和特定 channel 工具是动态注册的。工具组可在允许/拒绝列表中用 `group:` 前缀引用（如 `group:fs`）。
+
+> **委托说明**：`delegate` 工具已移除。委托现在完全通过 agent 团队处理：负责人通过共享任务板（`team_tasks`）创建任务，并通过 `spawn` 委托给成员 agent。
+
+### `wait` —— 在工具调用之间暂停
+
+内置 `wait` 工具会按给定时长暂停当前 agent 的工具序列。适用于 rate-limit 间隔、轮询节流，或在外部异步任务完成前等待下一次工具调用。
+
+| 字段 | 类型 | 说明 |
+|------|------|-------|
+| `timeMs` | integer（必填） | 暂停时长（毫秒）。默认范围：`100` ≤ `timeMs` ≤ `300000`（5 分钟）。 |
+| `reason` | string（可选） | 自由文本原因，连同 wait 结果一起记录；便于 trace 与调试。 |
+
+最小与最大上限可在部署级通过该工具的 runtime config 调整；默认为 100 ms 与 300 000 ms。
+
+> **与 `spawn(action=wait)` 不同：** `wait` 是顶级内置工具，按 `timeMs` 毫秒暂停**当前调用的 agent**。`spawn(action=wait)`（即下文的 **WaitAll**）是委托原语 —— 阻塞父 agent **直到先前 spawn 的子 agent 完成**。基于时间的暂停用 `wait`；fan-out/fan-in 委托用 `spawn(action=wait)`。
+
+## 工具执行流程
+
+当 agent 调用工具时：
+
+```mermaid
+graph LR
+    A[Agent 调用工具] --> C[注入上下文<br/>channel、用户、session]
+    C --> R[限速检查]
+    R --> E[执行工具]
+    E --> S[清除凭证]
+    S --> L[返回给 LLM]
+```
+
+1. **上下文注入** — 注入 channel、聊天 ID、用户 ID 和沙箱 key
+2. **限速** — 每 session 限速器防止滥用
+3. **执行** — 工具运行并产生输出
+4. **清除** — 从输出中移除凭证和敏感数据
+5. **返回** — 干净的结果返回给 LLM 进行下一次迭代
+
+### 并行与串行调度
+
+当 LLM 在一个回合内发出**多个**工具调用时，GoClaw 决定是否并发运行它们。只有已注册的**只读**工具才有资格进行有界并行原始 I/O。变更类（mutating）、async、MCP 桥接（`mcp_*`）、`exec`/`bash`、`wait`、未知/未注册工具，以及超出工具调用预算的批次均**串行**执行。包含任一不合格调用的混合批次将整体串行执行。`PreToolUse` hook 在任何并行执行之前运行，结果始终按原始 assistant 顺序处理。该资格判定由每个工具的能力（capability）元数据（副作用类别）驱动，因此自定义工具默认串行，除非注册为只读。
+
+### `read_document` Local-First 提取
+
+`read_document` 分析 PDF、DOCX 和文档图片。默认情况下，它将文件发送给云端视觉 provider。你可以选择启用 **local-first 提取**，在任何云端调用*之前*在主机上运行 `pdftotext`（PDF）和 `pandoc --sandbox`（DOCX），通过 `document_parser` 块配置：
+
+```json
+{
+  "local_first": false,
+  "max_pages": 200,
+  "timeout_sec": 30,
+  "min_text_len": 16
+}
+```
+
+| 字段 | 默认值 | 说明 |
+|-------|---------|-------------|
+| `local_first` | `false` | 启用本地提取（opt-in）。需要 PATH 上有 `pdftotext`/`pandoc` — `full` Docker 变体或使用 `ENABLE_FULL_SKILLS=true` 的构建中已包含 |
+| `max_pages` | `200` | PDF 页数限制；传给 `pdftotext -l` |
+| `timeout_sec` | `30` | 每次提取的超时；超时时进程组被 kill |
+| `min_text_len` | `16` | 提取成功所需的最少字符数（trim 后）；更短的输出会触发云端回退 |
+
+配置在启动时捕获（不热重载），但每次调用都会重新检查二进制可用性，因此运行时安装可被检测到而无需重启。任何提取未命中——已禁用、不支持的 MIME、缺少二进制、超时，或文本太少（例如扫描的纯图片 PDF）——都会透明回退到云端视觉链，对调用方无任何差异。
+
+## 工具 Profile
+
+Profile 控制 agent 可以访问哪些工具：
+
+| Profile | 可用工具 |
+|---------|----------|
+| `full` | 所有已注册工具（无限制） |
+| `coding` | `group:fs`、`group:runtime`、`group:sessions`、`group:memory`、`group:web`、`group:knowledge`、`group:media_gen`、`group:media_read`、`group:skills` |
+| `messaging` | `group:messaging`、`group:web`、`group:sessions`、`group:media_read`、`skill_search` |
+| `minimal` | 仅 `session_status` |
+
+在 agent 配置中设置 profile：
+
+```jsonc
+{
+  "agents": {
+    "defaults": {
+      "tools_profile": "full"
+    },
+    "list": {
+      "readonly-bot": {
+        "tools_profile": "messaging"
+      }
+    }
+  }
+}
+```
+
+## 工具别名
+
+GoClaw 注册别名，让 agent 可以用替代名称引用工具。这实现了与 Claude Code skills 和旧版工具名称的兼容：
+
+| 别名 | 映射到 |
+|------|--------|
+| `Read` | `read_file` |
+| `Write` | `write_file` |
+| `Edit` | `edit` |
+| `Bash` | `exec` |
+| `WebFetch` | `web_fetch` |
+| `WebSearch` | `web_search` |
+| `edit_file` | `edit` |
+
+别名在系统提示词中显示为单行描述。它们不是独立工具——调用别名会调用底层工具。
+
+### 确定性排序
+
+所有工具名称、别名和 MCP 工具描述在包含到系统提示词之前按字典序排序。这确保了跨请求的相同提示词前缀，最大化 LLM 提示词缓存命中率（Anthropic 和 OpenAI 按精确前缀匹配缓存）。
+
+## 策略引擎
+
+除了 profile，7 步策略引擎提供精细控制：
+
+1. 全局 profile（基础集）
+2. 特定 provider 的 profile 覆盖
+3. 全局允许列表（取交集）
+4. 特定 provider 的允许覆盖
+5. 每 agent 允许列表
+6. 每 agent 每 provider 的允许
+7. 组级允许
+
+允许列表之后，**拒绝列表**移除工具，然后 **alsoAllow** 追加工具（取并集）。工具组（`group:fs`、`group:runtime` 等）可用于任何允许/拒绝列表。
+
+### 示例：限制 Agent
+
+```jsonc
+{
+  "agents": {
+    "list": {
+      "safe-bot": {
+        "tools_profile": "full",
+        "tools_deny": ["exec", "write_file"],
+        "tools_also_allow": ["read_file"]
+      }
+    }
+  }
+}
+```
+
+## 文件系统拦截器
+
+两个特殊拦截器将文件操作路由到数据库：
+
+### 上下文文件拦截器
+
+当 agent 读/写上下文文件（SOUL.md、IDENTITY.md、AGENTS.md、USER.md、USER_PREDEFINED.md、BOOTSTRAP.md、HEARTBEAT.md）时，操作被路由到 `user_context_files` 表而非文件系统。TOOLS.md 明确排除在路由之外。这实现了每用户自定义和多租户隔离。
+
+### 记忆拦截器
+
+对 `MEMORY.md`、`memory.md` 或 `memory/*` 的写操作被路由到 `memory_documents` 表，自动分块并生成 embedding 用于搜索。
+
+## Shell 安全
+
+### `credentialed_exec` — 安全的 CLI 凭证注入
+
+`credentialed_exec` 工具以凭证直接注入到子进程环境变量的方式运行 CLI 工具（gh、gcloud、aws、kubectl、terraform）——无 shell、无凭证泄露。安全层包括：路径验证（阻止 `./gh` 欺骗）、shell 操作符阻断（`;`、`|`、`&&`）、每二进制拒绝模式（如阻断 `auth\s+`）和输出清除。
+
+已注册的 secure-CLI 二进制即使通过普通的 `exec` 工具调用也会被拦截：如果 agent 没有该二进制的授权（grant），`exec` 会拒绝并返回 `Binary "<name>" requires a secure CLI grant. Ask admin to grant access to this agent.`，而不会以主机环境运行它。该网关还会逐层拆解 shell 包装器（`sh -c`、`bash -c`、`env …`），最深处理 3 层，并在授权查询不可用时 fail-closed（拒绝执行）。
+
+**Windows 环境变量继承：** 在 Windows 上，credentialed exec 会继承原生 CLI 所需的系统环境变量 —— `SYSTEMROOT`、`SYSTEMDRIVE`、`WINDIR`、`COMSPEC`、`PATHEXT`、`TEMP`、`TMP`、`USERPROFILE`、`APPDATA`、`LOCALAPPDATA` 和 `PROGRAMFILES`。这些是大多数 Win32 程序运行所需的非机密运行时变量。凭证值仍单独注入并从输出中清除。
+
+### `exec` — Shell 安全
+
+`exec` 工具强制执行 15 个拒绝组——默认全部启用：
+
+| 组 | 阻断模式 |
+|----|----------|
+| `destructive_ops` | `rm -rf`、`del /f`、`mkfs`、`dd`、`shutdown`、fork 炸弹 |
+| `data_exfiltration` | `curl\|sh`、`wget\|sh`、DNS 外泄、`/dev/tcp/`、curl POST/PUT、localhost 访问 |
+| `reverse_shell` | `nc`/`ncat`/`netcat`、`socat`、`openssl s_client`、`telnet`、python/perl/ruby/node socket、`mkfifo` |
+| `code_injection` | `eval $`、`base64 -d\|sh` |
+| `privilege_escalation` | `sudo`、`su -`、`nsenter`、`unshare`、`mount`、`capsh`/`setcap` |
+| `dangerous_paths` | `chmod` on `/`、`chown` on `/`、`chmod +x` on `/tmp` `/var/tmp` `/dev/shm` |
+| `env_injection` | `LD_PRELOAD`、`DYLD_INSERT_LIBRARIES`、`LD_LIBRARY_PATH`、`GIT_EXTERNAL_DIFF`、`BASH_ENV` |
+| `container_escape` | `docker.sock`、`/proc/sys/`、`/sys/` |
+| `crypto_mining` | `xmrig`、`cpuminer`、`stratum+tcp://` |
+| `filter_bypass` | `sed /e`、`sort --compress-program`、`git --upload-pack`、`rg --pre=`、`man --html=` |
+| `network_recon` | `nmap`/`masscan`/`zmap`、`ssh/scp@`、`chisel`/`ngrok`/`cloudflared` 隧道 |
+| `package_install` | `pip install`、`npm install`、`apk add`、`yarn add`、`pnpm add` |
+| `persistence` | `crontab`、写入 `.bashrc`/`.profile`/`.zshrc` |
+| `process_control` | `kill -9`、`killall`、`pkill` |
+| `env_dump` | `env`、`printenv`、`/proc/*/environ`、`echo $GOCLAW_*` 密钥 |
+
+### 执行超时
+
+主机 `exec` 工具会中止运行过久的命令。该超时是一个名为 `timeout_seconds` 的每工具内置（builtin）设置，存储在 `exec` 工具的设置项下：
+
+```json
+{
+  "timeout_seconds": 120
+}
+```
+
+| 属性 | 取值 |
+|----------|---------|
+| 默认值 / 回退值 | 60 秒 |
+| 最小值 | 1 秒 |
+| 最大值 | 3600 秒（1 小时）——超过则向下限制（clamp）到该值 |
+| 无效 / 缺失值 | 回退为 60 秒 |
+
+可在仪表盘（**Config → Tools → Built-in Tools → exec**）或通过内置工具设置 API 进行配置。租户级设置会覆盖全局设置。当命令超时，进程组会被终止（先 SIGTERM，3 秒宽限期后再 SIGKILL），工具返回 `command timed out after <duration>`。
+
+> 该设置仅控制主机 `exec` 工具。它与每个自定义工具的 `timeout_seconds` 以及沙箱的 `sandbox_config.timeout_sec` **不同** —— 参见 [自定义工具](/custom-tools)。
+
+### 命令关键词白名单（Command Keyword Allowlist）
+
+当 agent 运行 credentialed CLI（通过 `credentialed_exec` / secure-CLI 网关）时，每二进制的 `deny_args` 模式会扫描参数值中的危险词汇。这可能产生误报：作为参数传入的合法产品或安全内容（例如包含被标记词汇的帖子正文或消息）会被拦截，尽管它只是纯数据而非命令。
+
+命令关键词白名单在不削弱 `deny_args` 的前提下解决这一问题。通过 `tools.commandKeywordAllowlist` 配置带作用域的规则：
+
+```json
+{
+  "tools": {
+    "commandKeywordAllowlist": [
+      {
+        "id": "social-post-content",
+        "command": "zernio",
+        "subcommands": ["posts:create"],
+        "args": ["--text"],
+        "keywords": ["install", "exec"],
+        "reason": "marketing copy may mention these words as content",
+        "enabled": true
+      }
+    ]
+  }
+}
+```
+
+| 字段 | 类型 | 说明 |
+|-------|------|-------------|
+| `id` | string | 规则标识符（用于审计日志） |
+| `command` | string | 规则适用的二进制（按大小写和路径归一化） |
+| `subcommands` | string[] | 必须匹配的可选子命令（如 `"posts:create"`） |
+| `args` | string[] | 其值会被扫描的参数标志（如 `"--text"`） |
+| `argPositions` | int[] | 可选的位置参数（0 起始，位于匹配的子命令之后） |
+| `keywords` | string[] | 允许出现在匹配参数值内的词汇 |
+| `reason` | string | 记录在审计日志中的自由文本备注 |
+| `enabled` | bool | 省略时默认为启用 |
+
+工作原理：在执行 `deny_args` 检查之前，被列入白名单的关键词会被遮蔽（替换为占位符），且**仅在匹配的参数值内部**。拒绝扫描不再因该词而触发，但命令路径拒绝模式和 shell 操作符阻断仍完全生效——白名单从不禁用 `deny_args`，它只豁免特定内容参数内的特定被标记词汇。每次匹配都会记录到 `security.command_keyword_allowlist` 审计日志，包含二进制、子命令、参数、关键词、规则 ID 以及 agent/租户上下文。
+
+该配置会通过 `TopicConfigChanged` 总线在**运行时热重载**——无需重启网关。
+
+### 全局 shellDenyGroups 配置（运行时热重载）
+
+除按 agent 覆盖外，管理员还可通过 `config.tools.shellDenyGroups`（`map[string]bool`）**全局**启用或禁用拒绝组：
+
+```json
+{
+  "tools": {
+    "shellDenyGroups": {
+      "package_install": true,
+      "env_dump": true
+    }
+  }
+}
+```
+
+该配置通过 `TopicConfigChanged` 总线**运行时自动热重载**——无需重启 gateway。按 agent 覆盖（agent 配置中的 `shell_deny_groups`）在每个 key 上优先于全局配置。
+
+参见：[deployment/security-hardening](/deployment/security-hardening)。
+
+### 每 Agent 覆盖
+
+管理员可按 agent 禁用特定组：
+
+```jsonc
+{
+  "agents": {
+    "list": {
+      "dev-bot": {
+        "shell_deny_groups": {
+          "package_install": false,
+          "process_control": false
+        }
+      }
+    }
+  }
+}
+```
+
+### 强化豁免匹配
+
+当 shell 命令匹配拒绝模式时，GoClaw 会检查路径豁免（如 `.goclaw/skills-store/`）。豁免逻辑非常严格：
+
+- **全部或无** — 命令中触发拒绝模式的每个字段都必须单独被豁免覆盖。一个未豁免的字段将阻止整个命令
+- **阻止路径遍历** — 包含 `..` 的字段永远不会被豁免，防止通过 `../../etc/passwd` 绕过
+- **去除引号** — 匹配前去除包围的引号（`"`、`'`），因为 LLM 经常给路径加引号
+
+这可防止 pipe/注释绕过攻击，如 `cat /app/data/skills-store/tool.py | cat /app/data/secret` — 第二个字段匹配拒绝模式但没有豁免，因此整个命令被阻止。
+
+`tools.exec_approval` 设置添加额外的审批层（`full`、`light` 或 `none`）。
+
+## spawn — 子 Agent 编排
+
+`spawn` 工具（属于 `group:sessions`）用于创建和运行子 agent。主要能力：
+
+| 能力 | 详情 |
+|------|------|
+| **WaitAll** | `spawn(action=wait, timeout=N)` 阻塞父 agent 直到所有已 spawn 的子 agent 完成。适用于 fan-out/fan-in 模式。与上文的内置 `wait` 工具不同 —— `wait` 按固定时长暂停，不依赖任何子 agent 状态。 |
+| **Auto-retry** | 可配置的 `MaxRetries`（默认 `2`），LLM 失败时采用线性退避自动重试。瞬时错误自动处理。 |
+| **Token 追踪** | 每个子 agent 累计每次调用的输入/输出 token 数。总量包含在 announce 消息中，方便父 agent 核算成本。 |
+| **SubagentDenyAlways** | 子 agent 不能再 spawn 嵌套子 agent——`team_tasks` 工具在子 agent 上下文中被屏蔽。防止无限委托链。 |
+| **生产者-消费者 announce 队列** | 错开的子 agent 结果被排队并合并为父 agent 侧的单次 LLM run 通知，减少不必要的唤醒。 |
+
+```jsonc
+// 示例：fan-out 然后 wait
+spawn(action=start, prompt="Summarize part A")
+spawn(action=start, prompt="Summarize part B")
+spawn(action=wait, timeout=120)  // 阻塞直到两者都完成
+```
+
+## Session 工具安全
+
+Session 工具（`sessions_list`、`sessions_history`、`sessions_send`）通过 fail-closed 验证进行加固：
+
+- **防止幻影 session**：session 查询使用只读 Get，从不使用 GetOrCreate，防止意外创建 session
+- **所有权验证**：session key 必须匹配调用 agent 的前缀（`agent:{agentID}:*`）
+- **Fail-closed 设计**：缺少 agentID 或所有权无效时立即返回错误——绝不放行
+- **自发送阻断**：`message` 工具阻止 agent 向自己当前的 channel/chat 发送消息，防止重复媒体投递
+
+## 自适应工具计时
+
+GoClaw 追踪每个 session 中每个工具的执行时间。如果工具调用耗时超过其历史最大值的 2 倍（至少有 3 个先前样本），则发出慢工具通知。没有历史记录的工具默认阈值为 120 秒。
+
+## 自定义工具和 MCP
+
+除内置工具外，你还可以通过以下方式扩展 agent：
+
+- **自定义工具** — 通过 dashboard 或 API 定义工具，包含输入 schema 和处理器
+- **MCP 服务器** — 连接 Model Context Protocol 服务器进行动态工具注册
+
+### 浏览器自动化
+
+`browser` 工具让 agent 控制无头浏览器（Chrome/Chromium）。必须在配置中启用（`tools.browser.enabled: true`）。
+
+**安全机制：**
+
+| 参数 | 默认值 | 配置键 | 说明 |
+|------|--------|--------|------|
+| 操作超时 | 30s | `tools.browser.action_timeout_ms` | 每次浏览器操作的最大时间 |
+| 空闲超时 | 10min | `tools.browser.idle_timeout_ms` | 空闲后自动关闭页面（0 = 禁用，负数 = 禁用） |
+| 最大页面数 | 5 | `tools.browser.max_pages` | 每租户最大打开页面数 |
+
+## 常见问题
+
+| 问题 | 解决方案 |
+|------|----------|
+| Agent 无法使用工具 | 检查 tools_profile 和拒绝列表；验证工具是否存在于该 profile |
+| Shell 命令被阻断 | 查看拒绝模式；调整 `exec_approval` 级别 |
+| 工具结果太大 | GoClaw 自动裁剪超过 4,000 字符的结果；考虑使用更具体的查询 |
+
+## 下一步
+
+- [记忆系统](./memory-system.md) — 长期记忆和搜索的工作原理
+- [多租户](/multi-tenancy) — 每用户工具访问和隔离
+- [自定义工具](/custom-tools) — 构建你自己的工具
+
+<!-- goclaw-source: fabe86b3 | updated: 2026-06-30 -->

@@ -1,0 +1,157 @@
+# GoClaw
+
+> Enterprise AI Agent Platform — multi-tenant gateway for AI agents
+
+
+## Getting Started
+- [What is GoClaw?](getting-started/what-is-goclaw.md): A multi-tenant AI agent gateway that connects LLMs to messaging channels, tools, and teams.
+- [Installation](getting-started/installation.md): Get GoClaw running on your machine in minutes. Four paths: quick binary install, bare metal, Docker (local), or Docker on a VPS.
+- [Quick Start](getting-started/quick-start.md): Your first AI agent conversation in 5 minutes.
+- [Configuration](getting-started/configuration.md): How to configure GoClaw with config.json and environment variables.
+- [Web Dashboard Tour](getting-started/web-dashboard-tour.md): A visual guide to the GoClaw management dashboard.
+- [Migrating from OpenClaw](getting-started/migrating-from-openclaw.md): What's different in GoClaw and how to move your setup over.
+
+## Core Concepts
+- [How GoClaw Works](core-concepts/how-goclaw-works.md): The architecture behind GoClaw's AI agent gateway.
+- [Agents Explained](core-concepts/agents-explained.md): What agents are, how they work, and the difference between open and predefined.
+- [Sessions & History](core-concepts/sessions-and-history.md): How GoClaw tracks conversations and manages message history.
+- [Tools Overview](core-concepts/tools-overview.md): The 50+ built-in tools agents can use, organized by category.
+- [Memory System](core-concepts/memory-system.md): How agents remember facts across conversations using a 3-tier architecture with automatic consolidation.
+- [Multi-Tenancy](core-concepts/multi-tenancy.md): How GoClaw isolates data — from a single user to a full SaaS platform with many customers.
+
+## Agents
+- [Creating Agents](agents/creating-agents.md): Set up a new AI agent via CLI, dashboard, or managed API.
+- [Open vs Predefined Agents](agents/open-vs-predefined.md): Two agent architectures: per-user isolation (open) vs. shared context (predefined).
+- [Context Files](agents/context-files.md): The 8 markdown files that define an agent's personality, knowledge, and behavior.
+- [Summoning & Bootstrap](agents/summoning-bootstrap.md): How personality files are generated automatically on agent creation and first use.
+- [Editing Personality](agents/editing-personality.md): Change your agent's tone, identity, and boundaries through two core files: SOUL.md (personality & style) and IDENTITY.md (name, emoji, creature).
+- [Sharing & Access Control](agents/sharing-and-access.md): Control who can use your agents. Access is enforced via owner vs. non-owner distinction; role labels are stored for future enforcement.
+- [User Overrides](agents/user-overrides.md): **Partially implemented feature.** The database schema and store API exist, but overrides are not yet applied at runtime. This page documents the planned behavior and current store API.
+- [System Prompt Anatomy](agents/system-prompt-anatomy.md): Understand how GoClaw builds system prompts: 23 sections, assembled dynamically, with smart truncation so everything fits in context.
+
+## Providers
+- [Provider Overview](providers/overview.md): Providers are the interface between GoClaw and LLM APIs — configure one (or many) and every agent can use it.
+- [Anthropic (Claude)](providers/anthropic.md): GoClaw's native Claude integration — built directly on the Anthropic HTTP+SSE API with full support for extended thinking and prompt caching.
+- [OpenAI / Azure OpenAI](providers/openai.md): Connect GoClaw to OpenAI's GPT-4o and o-series reasoning models using the standard OpenAI API.
+- [OpenRouter](providers/openrouter.md): Access 100+ models from Anthropic, Google, Meta, Mistral, and more through a single API key.
+- [Google Gemini](providers/gemini.md): Use Google's Gemini models in GoClaw via the OpenAI-compatible endpoint.
+- [DeepSeek](providers/deepseek.md): Run DeepSeek's powerful reasoning models in GoClaw, with full support for reasoning_content streaming.
+- [Groq](providers/groq.md): Run open-source models at exceptional speed using Groq's LPU inference hardware.
+- [Mistral](providers/mistral.md): Use Mistral AI's models in GoClaw via the OpenAI-compatible API.
+- [xAI (Grok)](providers/xai.md): Connect GoClaw to xAI's Grok models using the OpenAI-compatible API.
+- [MiniMax](providers/minimax.md): Connect GoClaw to MiniMax models using their OpenAI-compatible API with a custom chat endpoint.
+- [Cohere](providers/cohere.md): Connect GoClaw to Cohere's Command models using their OpenAI-compatible API.
+- [Ollama](providers/ollama.md): Run open-source models locally with Ollama — no cloud required.
+- [Ollama Cloud](providers/ollama-cloud.md): Use Ollama-compatible models via cloud hosting — the convenience of hosted inference with Ollama's open model ecosystem.
+- [Perplexity](providers/perplexity.md): Connect GoClaw to Perplexity's search-augmented AI models via their OpenAI-compatible API.
+- [DashScope (Qwen)](providers/dashscope.md): Connect GoClaw to Alibaba's Qwen models via the DashScope OpenAI-compatible API.
+- [Vertex AI (Google Cloud)](providers/vertex.md): Use Google Cloud Vertex AI's OpenAI-compatible Gemini endpoint with OAuth2 service-account or Application Default Credentials.
+- [Bailian](providers/bailian.md): Connect to Alibaba Cloud Bailian (百炼) Coding models via the OpenAI-compatible endpoint.
+- [Kimi Coding (Moonshot)](providers/kimi.md): Connect GoClaw to Moonshot's Kimi Coding models via the OpenAI-compatible Coding endpoint.
+- [Suno](providers/suno.md): Generate music and audio with Suno's AI music generation platform.
+- [Zai](providers/zai.md): Connect to Zai and Zai Coding providers (OpenAI-compatible).
+- [YesScale](providers/yescale.md): Run AI models at scale with YesScale's cloud AI platform.
+- [Novita AI](providers/novita.md): OpenAI-compatible LLM provider with access to a wide range of open-source models.
+- [Claude CLI](providers/claude-cli.md): Run Claude Code (the `claude` CLI binary) as a GoClaw provider — giving your agents full agentic tool use powered by Anthropic's Claude subscription.
+- [Codex / ChatGPT](providers/codex-chatgpt.md): Use your ChatGPT subscription to power GoClaw agents via the OpenAI Responses API and OAuth authentication.
+- [ACP (Agent Client Protocol)](providers/acp.md): Use Claude Code, Codex CLI, or Gemini CLI as LLM providers through the Agent Client Protocol — orchestrated as JSON-RPC subprocesses.
+- [Custom / OpenAI-Compatible](providers/custom-provider.md): Connect GoClaw to any OpenAI-compatible API — local models, self-hosted inference servers, or third-party proxies.
+
+## Channels
+- [Channel Overview](channels/overview.md): Channels connect messaging platforms (Telegram, Discord, Larksuite, etc.) to the GoClaw agent runtime via a unified message bus. Each channel translates platform-specific events into standardized `InboundMessage` objects and converts agent responses into platform-appropriate output.
+- [Telegram](channels/telegram.md): Telegram bot integration via long polling (Bot API). Supports DMs, groups, forum topics, speech-to-text, and streaming responses.
+- [Bitrix24](channels/bitrix24.md): Bitrix24 integration via the **imbot** (chatbot) API. GoClaw registers a bot on a Bitrix24 portal, receives chat events through a webhook, and replies as the bot. One GoClaw gateway can serve many bots across many portals, and several bots can share a single portal (they share OAuth tokens and the refresh loop).
+- [Discord](channels/discord.md): Discord bot integration via the Discord Gateway API. Supports DMs, servers, threads, and streaming responses via message editing.
+- [Feishu / Lark](channels/feishu.md): **Create Feishu App:**
+- [Larksuite](channels/larksuite.md): **Create Larksuite App:**
+- [Zalo OA](channels/zalo-oa.md): Zalo Official Account (OA) integration. DM-only with pairing-based access control and image support.
+- [Zalo Personal](channels/zalo-personal.md): Unofficial personal Zalo account integration using reverse-engineered protocol (zcago). Supports DMs and groups with restrictive access control.
+- [Slack](channels/slack.md): Slack integration via Socket Mode (WebSocket). Supports DMs, channel @mentions, threaded replies, streaming, reactions, media, and message debouncing.
+- [WhatsApp](channels/whatsapp.md): Direct WhatsApp integration. GoClaw connects directly to WhatsApp's multi-device protocol — no external bridge or Node.js service required. Auth state is stored in the database (PostgreSQL or SQLite).
+- [Pancake](channels/pancake.md): Unified multi-platform channel proxy powered by Pancake (pages.fm). A single Pancake API key gives access to Facebook, Zalo OA, Instagram, TikTok, WhatsApp, and Line — no per-platform OAuth required.
+- [Facebook](channels/facebook.md): Facebook Fanpage integration supporting Messenger inbox auto-reply, comment auto-reply, and first inbox DM via Facebook Graph API.
+- [WebSocket](channels/websocket.md): Direct RPC communication with the GoClaw gateway over WebSocket. No intermediate messaging platform needed—perfect for custom clients, web apps, and testing.
+- [Browser Pairing](channels/browser-pairing.md): Secure authentication flow for custom WebSocket clients using 8-character pairing codes. Ideal for private web apps and desktop clients that need to verify device identity.
+
+## Agent Teams
+- [What Are Teams?](agent-teams/what-are-teams.md): Agent teams enable multiple agents to collaborate on shared tasks. A **lead** agent orchestrates work, while **members** execute tasks independently and report results back.
+- [Creating & Managing Teams](agent-teams/creating-managing-teams.md): Create teams via API, Dashboard, or CLI. The system automatically establishes delegation links between the lead and all members, injects `TEAM.md` into the lead's system prompt, and wires up task board access for all members.
+- [Task Board](agent-teams/task-board.md): The task board is a shared work tracker accessible to all team members. Tasks can be created with priorities, dependencies, and blocking constraints. Members claim pending tasks, work independently, and mark them complete with results.
+- [Team Messaging](agent-teams/team-messaging.md): Team members communicate via a built-in mailbox system. Members can send direct messages and read unread messages. The lead agent does not have access to the `team_message` tool — it is removed from the lead's tool list by policy. Messages flow through the message bus with real-time delivery.
+- [Delegation & Handoff](agent-teams/delegation-and-handoff.md): Delegation allows the lead to assign work to member agents via the task board. Handoff transfers conversation control between agents without interrupting the user's session.
+
+## Advanced
+- [Custom Tools](advanced/custom-tools.md): Give your agents new shell-backed capabilities at runtime — no recompile, no restart.
+- [MCP Integration](advanced/mcp-integration.md): Connect any Model Context Protocol server to GoClaw and instantly give your agents its full tool catalog.
+- [Skills](advanced/skills.md): Package reusable knowledge into Markdown files and inject them into any agent's context automatically.
+- [Scheduling & Cron](advanced/scheduling-cron.md): Trigger agent turns automatically — once, on a repeating interval, or on a cron expression.
+- [Heartbeat](advanced/heartbeat.md): Proactive periodic check-ins — agents execute a configurable checklist on a timer and report results to your channels.
+- [Sandbox](advanced/sandbox.md): Run agent shell commands inside an isolated Docker container so untrusted code never touches your host.
+- [Media Generation](advanced/media-generation.md): Generate images, videos, and audio directly from your agents — with automatic provider fallback chains.
+- [TTS & Voice](advanced/tts-voice.md): Add voice replies to your agents — pick from five providers and control exactly when audio fires.
+- [Knowledge Graph](advanced/knowledge-graph.md): Agents automatically extract entities and relationships from conversations, building a searchable graph of people, projects, and concepts.
+- [Knowledge Vault](advanced/knowledge-vault.md): A structured knowledge store that lets agents curate workspace documents with bidirectional wikilinks, semantic search, and team-scoped access — all layered on top of existing memory systems.
+- [Caching](advanced/caching.md): Reduce database queries with in-memory or Redis caching for frequently accessed data.
+- [Browser Automation](advanced/browser-automation.md): Give your agents a real browser — navigate pages, take screenshots, scrape content, and fill forms.
+- [Extended Thinking](advanced/extended-thinking.md): Let your agent "think out loud" before answering — better results on complex tasks, at the cost of extra tokens and latency.
+- [Hooks & Quality Gates](advanced/hooks-quality-gates.md): Intercept, observe, or inject behavior at defined points in the agent loop — block unsafe tool calls, auto-audit after writes, inject session context, or notify on stop.
+- [Authentication & OAuth](advanced/authentication.md): Connect GoClaw to ChatGPT via OAuth — no API key needed, uses your existing OpenAI account.
+- [API Keys & RBAC](advanced/api-keys-rbac.md): Manage API keys with role-based access control for multi-user and programmatic access deployments.
+- [Agent Permission Matrix](advanced/permission-matrix.md): The full set of authorization layers that decide what an agent can do across channels, groups, and workspaces — and how those layers combine.
+- [CLI Credentials](advanced/cli-credentials.md): Securely store and manage named credential sets for shell tool execution, with per-agent access control via grants.
+- [Exec Approval](advanced/exec-approval.md): Pause agent shell commands for human review before they run — approve, deny, or permanently allow from the dashboard.
+- [Context Pruning](advanced/context-pruning.md): Automatically trim old tool results to keep agent context within token limits.
+- [Channel Instances](advanced/channel-instances.md): Run multiple accounts per channel type — each with its own credentials, agent binding, and writer permissions.
+- [Webhooks](advanced/webhooks.md): Trigger agents or deliver channel messages from external systems via HMAC-authenticated HTTP endpoints.
+- [Workstations](advanced/workstations.md): Run agent commands on remote machines through SSH or Docker, with a per-workstation allowlist and a full audit trail.
+- [Usage & Quota](advanced/usage-quota.md): Track token consumption per agent and session, and enforce per-user request limits across hour, day, and week windows.
+- [Cost Tracking](advanced/cost-tracking.md): Monitor token costs per agent and provider using configurable per-model pricing.
+- [Model Steering](advanced/model-steering.md): How GoClaw guides small models through 3 control layers: Track (scheduling), Hint (contextual nudges), and Guard (safety boundaries).
+- [Agent Evolution](advanced/agent-evolution.md): Let predefined agents refine their communication style and build reusable skills over time — automatically, with your consent.
+
+## Deployment
+- [Docker Compose](deployment/docker-compose.md): GoClaw ships a composable docker-compose setup: a base file, a `compose.d/` directory of always-active overlays, and a `compose.options/` directory of opt-in overlays you mix and match.
+- [Database Setup](deployment/database-setup.md): GoClaw requires **PostgreSQL 15+** with `pgvector` for multi-tenant storage, semantic memory search, and Knowledge Vault features. A **SQLite** backend is also available for desktop (single-user) deployments with reduced feature set — see [SQLite vs PostgreSQL](#sqlite-vs-postgresql) below.
+- [Security Hardening](deployment/security-hardening.md): GoClaw uses five independent defense layers — transport, input, tools, output, and isolation — so a bypass of one layer doesn't compromise the rest.
+- [Observability](deployment/observability.md): Monitor every LLM call, tool use, and agent run — from the built-in dashboard to Jaeger and beyond.
+- [Tailscale](deployment/tailscale.md): Expose your GoClaw gateway securely on your Tailscale network — no port forwarding, no public IP required.
+- [Production Checklist](deployment/production-checklist.md): Everything you need to verify before taking GoClaw from development to production.
+- [Upgrading](deployment/upgrading.md): How to safely upgrade GoClaw — binary, database schema, and data migrations — with zero surprises.
+
+## Recipes
+- [Personal Assistant](recipes/personal-assistant.md): Single-user AI assistant on Telegram with memory and a custom personality.
+- [Team Chatbot](recipes/team-chatbot.md): Multi-agent team with a lead coordinator and specialist sub-agents for different tasks.
+- [Customer Support](recipes/customer-support.md): A predefined agent that handles customer queries consistently across all users, with specialist escalation.
+- [Code Review Agent](recipes/code-review-agent.md): An agent that reviews code using a Docker sandbox for safe execution and custom shell tools.
+- [Multi-Channel Setup](recipes/multi-channel-setup.md): Put the same agent on Telegram, Discord, and WebSocket simultaneously.
+
+## Showcases
+- [Gallery](showcases/gallery.md): Real-world examples and deployment scenarios for GoClaw.
+
+## Reference
+- [CLI Commands](reference/cli-commands.md): Complete reference for every `goclaw` command, subcommand, and flag.
+- [WebSocket Protocol](reference/websocket-protocol.md): Protocol v3 specification for the GoClaw gateway WebSocket RPC interface.
+- [REST API](reference/rest-api.md): All `/v1` HTTP endpoints for agent management, providers, skills, traces, and more.
+- [API Endpoint Catalog](reference/api-endpoints-catalog.md): Auto-generated complete index of all REST endpoints. For request/response details, examples, and authentication, see [REST API Reference](rest-api.md).
+- [Configuration Reference](reference/config-reference.md): Full `config.json` schema — every field, type, and default value.
+- [Environment Variables](reference/environment-variables.md): All environment variables recognized by GoClaw, organized by category.
+- [Database Schema](reference/database-schema.md): All PostgreSQL tables, columns, types, and constraints across all migrations.
+- [Glossary](reference/glossary.md): Definitions for GoClaw-specific terms used throughout the documentation.
+- [AGENTS.md](reference/templates/agents.md): Default operating instructions injected into every agent's system prompt — covering conversational style, memory, group chat behavior, and platform formatting.
+- [SOUL.md](reference/templates/soul.md): The personality file — defines who your agent is, its tone, opinions, boundaries, and expertise.
+- [IDENTITY.md](reference/templates/identity.md): A short structured file that tells GoClaw (and the agent itself) its name, nature, emoji, and avatar.
+- [CAPABILITIES.md](reference/templates/capabilities.md): Domain knowledge, technical skills, and specialized expertise — what your agent can DO.
+- [TOOLS.md](reference/templates/tools.md): A local notes file for environment-specific tool details — camera names, SSH hosts, TTS voices, device nicknames.
+- [USER.md](reference/templates/user.md): A per-user profile file — the agent's notes about the human it works with.
+- [USER_PREDEFINED.md](reference/templates/user-predefined.md): Agent-level user handling rules for predefined agents — shared across all users.
+- [BOOTSTRAP.md](reference/templates/bootstrap.md): The first-run ritual file — guides a new agent through discovering its identity and learning about its user.
+- [TEAM.md](reference/templates/team.md): Dynamic context file injected for agents in a team — generated at runtime, never manually created or stored on disk.
+
+## Troubleshooting
+- [Common Issues](troubleshooting/common-issues.md): Fixes for the most frequent problems when running GoClaw.
+- [WebSocket Issues](troubleshooting/websocket.md): Troubleshooting WebSocket connections, authentication, and message handling in GoClaw.
+- [Channels](troubleshooting/channels.md): Per-channel troubleshooting for Telegram, Discord, Feishu, Zalo, and WhatsApp.
+- [Providers](troubleshooting/providers.md): Fixes for API key errors, rate limiting, model mismatches, and schema validation failures.
+- [MCP](troubleshooting/mcp.md): Troubleshooting MCP (Model Context Protocol) server connections, tool registration, and execution.
+- [Database](troubleshooting/database.md): Troubleshooting PostgreSQL migrations, pgvector, connection pool, and slow queries.
+- [Agent Teams](troubleshooting/agent-teams.md): Troubleshooting team creation, delegation, task routing, and inter-agent communication.

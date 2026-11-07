@@ -1,0 +1,178 @@
+> Bản dịch từ [English version](/troubleshoot-providers)
+
+# Vấn đề Provider
+
+> Cách xử lý lỗi API key, rate limiting, model mismatch, và schema validation failure.
+
+## Tổng quan
+
+GoClaw hỗ trợ Anthropic (native HTTP+SSE) và nhiều OpenAI-compatible provider. Provider chỉ được đăng ký khi khởi động nếu có API key. Tất cả provider đều dùng automatic retry với exponential backoff cho lỗi tạm thời (429, 500–504, connection reset, timeout).
+
+## Provider Không Được Đăng Ký
+
+Nếu provider không xuất hiện trong dashboard hoặc trả về `provider not found`, nó đã bị bỏ qua khi khởi động vì thiếu API key.
+
+Kiểm tra log khởi động tìm dòng `registered provider`:
+
+```
+INFO registered provider name=anthropic
+INFO registered provider name=openai
+```
+
+Nếu provider bị thiếu, đặt env var tương ứng và restart:
+
+| Provider | Env var |
+|----------|---------|
+| Anthropic | `GOCLAW_ANTHROPIC_API_KEY` |
+| OpenAI | `GOCLAW_OPENAI_API_KEY` |
+| Gemini | `GOCLAW_GEMINI_API_KEY` |
+| DashScope / Qwen | `GOCLAW_DASHSCOPE_API_KEY` |
+| OpenRouter | `GOCLAW_OPENROUTER_API_KEY` |
+| Groq | `GOCLAW_GROQ_API_KEY` |
+| DeepSeek | `GOCLAW_DEEPSEEK_API_KEY` |
+| Mistral | `GOCLAW_MISTRAL_API_KEY` |
+| xAI / Grok | `GOCLAW_XAI_API_KEY` |
+| MiniMax | `GOCLAW_MINIMAX_API_KEY` |
+| Cohere | `GOCLAW_COHERE_API_KEY` |
+| Perplexity | `GOCLAW_PERPLEXITY_API_KEY` |
+
+Provider cũng có thể thêm lúc runtime qua dashboard (lưu trong bảng `llm_providers` với key mã hóa AES-256-GCM).
+
+## Lỗi Thường Gặp
+
+| Vấn đề | Nguyên nhân | Cách xử lý |
+|--------|-------------|------------|
+| `HTTP 401` | API key không hợp lệ hoặc bị thu hồi | Tạo lại key từ console của provider; cập nhật env var hoặc dashboard |
+| `HTTP 403` | Tài khoản bị đình chỉ hoặc hạn chế plan | Kiểm tra trạng thái tài khoản provider; nâng cấp plan nếu đang dùng free tier |
+| `HTTP 429` | Hit rate limit | GoClaw tự retry tối đa 3× với backoff (min 300ms, max 30s); nếu kéo dài, giảm concurrency |
+| `HTTP 404` / model not found | Tên model sai hoặc model bị xóa | Kiểm tra tên model hiện tại trong tài liệu provider; cập nhật agent config |
+| `HTTP 500/502/503/504` | Provider outage | Tự retry; kiểm tra trang status của provider nếu kéo dài |
+| Connection reset / EOF / timeout | Mất ổn định mạng | Tự retry; kiểm tra DNS và firewall rules |
+
+## Retry Behavior
+
+GoClaw retry khi gặp HTTP 429, 500, 502, 503, 504, và network error. Cấu hình mặc định:
+
+- **Số lần:** 3
+- **Delay ban đầu:** 300ms
+- **Delay tối đa:** 30s
+- **Backoff:** exponential với ±10% jitter
+- **Retry-After header:** được tôn trọng khi có (ví dụ trên 429 từ Anthropic/OpenAI)
+
+### Lỗi Codex / ChatGPT Responses stream
+
+Provider OAuth `openai-codex` có thể nhận event `response.failed` tạm thời hoặc kiểu rate limit bên trong một Responses API SSE stream đã được thiết lập. GoClaw phân loại message có hướng dẫn retry rõ ràng hoặc wording rate limit là retryable, nhưng chỉ replay Codex request nếu chưa emit content hiển thị, thinking/reasoning, image, hoặc tool call nào.
+
+Nếu output đã được emit, GoClaw giữ lại lỗi hoặc partial result và không retry stream đó. Đây là chủ ý để tránh replay toàn bộ request làm trùng text, tool call, hoặc image.
+
+Không nhầm guard này với **fallback của Codex OAuth pool**, nơi chọn tài khoản đủ điều kiện khác, hoặc **HTTP retry chung** ở trên, nơi xử lý HTTP 429/5xx và network failure tại request/transport layer.
+
+## Schema Validation Errors (Gemini)
+
+Gemini từ chối các field JSON Schema mà provider khác chấp nhận. GoClaw tự động loại bỏ field không tương thích trước khi gửi tool definition.
+
+Field bị xóa cho Gemini: `$ref`, `$defs`, `additionalProperties`, `examples`, `default`
+
+Nếu bạn vẫn thấy schema validation error từ Gemini, tool definition có thể dùng nested reference chưa được resolve đầy đủ. Đơn giản hóa parameter schema của tool.
+
+Field bị xóa cho Anthropic: `$ref`, `$defs`
+
+## Extended Thinking (Anthropic)
+
+Extended thinking cần model tương thích (ví dụ `claude-opus-4-5`) và một `thinking` block trong request. GoClaw tự động thêm header `anthropic-beta: interleaved-thinking-2025-05-14` khi có thinking block.
+
+| Vấn đề | Nguyên nhân | Cách xử lý |
+|--------|-------------|------------|
+| Thinking không xuất hiện | Model không hỗ trợ | Dùng `claude-opus-4-5` hoặc model có khả năng thinking khác |
+| Các block `redacted_thinking` | Encrypted thinking được trả về | Bình thường — chúng được giữ lại để context passback; không có nội dung đọc được |
+| Budget vượt quá | `budget_tokens` quá thấp | Tăng `budget_tokens` trong agent config; tối thiểu thường là 1024 |
+
+## Claude CLI Provider
+
+Provider `claude-cli` shell ra binary `claude` thay vì gọi API trực tiếp.
+
+| Vấn đề | Nguyên nhân | Cách xử lý |
+|--------|-------------|------------|
+| Binary không tìm thấy | `claude` không có trong PATH | Đặt `GOCLAW_CLAUDE_CLI_PATH` bằng đường dẫn đầy đủ đến binary |
+| Auth failure | CLI chưa xác thực | Chạy `claude login` thủ công để xác thực |
+| Model sai | Default model mismatch | Đặt `GOCLAW_CLAUDE_CLI_MODEL` theo model alias mong muốn |
+| Work dir errors | Đường dẫn `GOCLAW_CLAUDE_CLI_WORK_DIR` không tồn tại | Tạo thư mục hoặc cập nhật env var |
+
+## Codex Provider
+
+Provider `codex` (OpenAI Codex CLI) cũng shell ra binary local.
+
+| Vấn đề | Nguyên nhân | Cách xử lý |
+|--------|-------------|------------|
+| Binary không tìm thấy | `codex` không có trong PATH | Cài Codex CLI hoặc đặt đường dẫn trong provider config |
+| Auth failure | CLI chưa xác thực | Chạy `codex auth` hoặc đặt `OPENAI_API_KEY` trong environment |
+| Stream read error | Binary crash giữa stream | Kiểm tra tương thích phiên bản binary; cập nhật Codex CLI |
+
+## ACP Provider
+
+Provider `acp` (Agent Client Protocol) điều phối bất kỳ coding agent tương thích ACP nào (Claude Code, Codex CLI, Gemini CLI) như một subprocess dùng JSON-RPC 2.0 qua stdin/stdout. Provider này không cần API key — binary agent tự quản lý xác thực.
+
+Cấu hình trong `config.json` dưới `providers.acp`:
+
+```json
+"acp": {
+  "binary": "claude",
+  "args": [],
+  "model": "claude",
+  "work_dir": "",
+  "idle_ttl": "5m",
+  "perm_mode": "approve-all"
+}
+```
+
+| Vấn đề | Nguyên nhân | Cách xử lý |
+|--------|-------------|------------|
+| `acp: binary not found, skipping` | Đường dẫn binary không tồn tại hoặc không executable | Kiểm tra binary đã cài và trường `binary` là đường dẫn đúng hoặc tên trong `$PATH` |
+| `acp: spawn failed` | Subprocess không khởi động được | Kiểm tra binary có thể chạy; chạy thủ công để xem lỗi khởi động |
+| `acp: prompt failed` | Lỗi giao tiếp JSON-RPC qua stdin/stdout | Kiểm tra log subprocess; đảm bảo phiên bản binary hỗ trợ ACP protocol |
+| `acp: session_key required in options` | Không có session key trong request | ACP yêu cầu session key — đảm bảo agent config truyền `session_key` trong options |
+| `acp: no user message in request` | Nội dung request rỗng | Đảm bảo chat request có user message |
+| Provider không có trong dashboard | Trường `binary` chưa đặt trong config | Đặt `providers.acp.binary` trong `config.json` và restart |
+
+**Log khởi động khi ACP đăng ký thành công:**
+
+```
+INFO registered provider name=acp binary=claude
+```
+
+## Hệ Thống Provider Adapter (v3)
+
+GoClaw v3 giới thiệu `SSEScanner` thống nhất (`providers/sse_reader.go`) dùng chung cho các provider streaming OpenAI, Anthropic, và Codex. Điều này loại bỏ sự khác biệt trong phân tích SSE theo từng provider.
+
+| Vấn đề | Nguyên nhân | Giải pháp |
+|--------|-------------|-----------|
+| Streaming bị cắt giữa chừng | Frame SSE upstream bị tách qua buffer scanner | Hiếm gặp — scanner dùng buffer 512 KB; nếu tái hiện, kiểm tra payload kết quả tool quá lớn |
+| Streaming hoạt động với OpenAI nhưng không phải Anthropic | Proxy tùy chỉnh xóa các dòng `event:` | Đảm bảo proxy truyền nguyên dòng SSE thô; GoClaw dùng cùng parser cho tất cả provider |
+
+Credential provider thêm lúc runtime (dashboard) được lưu trong `llm_providers` với mã hóa AES-256-GCM và được resolve tại thời điểm request. Override per-agent trong agent config được ưu tiên hơn cài đặt provider toàn cục.
+
+## Tạo Provider In Ra "FAILED" Nhưng Thực Ra Đã Thành Công
+
+**Phiên bản bị ảnh hưởng:** < v3.11.3
+
+Luồng auto-verify sau khi tạo provider dùng cấu trúc response cũ `{success, models}` để kiểm tra provider mới có hợp lệ không. Provider đã được tạo đúng trong database, nhưng bước verify sau khi tạo đọc sai field và in `FAILED` ra console dù provider hoàn toàn bình thường.
+
+**Đã sửa trong v3.11.3:** Luồng verify giờ dùng cấu trúc `{valid, error}` và kích hoạt ping mode khi body request rỗng, nên verify với body rỗng trả về `{valid:true}` khi thành công. Nâng cấp lên v3.11.3+ để khắc phục.
+
+## `goclaw providers delete` Lỗi Foreign Key trên `agent_heartbeats`
+
+**Phiên bản bị ảnh hưởng:** < v3.11.3
+
+Trước v3.11.3, foreign key từ `agent_heartbeats` đến `llm_providers` được định nghĩa là `RESTRICT`. Xóa provider đang được tham chiếu bởi bất kỳ heartbeat row nào sẽ thất bại với lỗi foreign key constraint.
+
+**Đã sửa trong v3.11.3:** Migration `000057_heartbeat_provider_fk_set_null` đổi FK thành `ON DELETE SET NULL`. Hàm `DeleteProvider` (PostgreSQL và SQLite) giờ thực hiện trong một transaction: trước tiên vô hiệu hóa tất cả heartbeat row bị ảnh hưởng, sau đó mới xóa provider, để scheduler tick tiếp theo không chạy với config provider cũ. Log `slog.Warn("heartbeat.provider_cleared")` được ghi kèm số lượng heartbeat đã bị vô hiệu hóa.
+
+Yêu cầu migration #057 đã được áp dụng (`./goclaw migrate up`). Kiểm tra log `heartbeat.provider_cleared` sau khi xóa để xác nhận số heartbeat bị xóa.
+
+## Tiếp theo
+
+- [Vấn đề database](/troubleshoot-database)
+- [Các vấn đề thường gặp](/troubleshoot-common)
+- [Vấn đề channel](/troubleshoot-channels)
+
+<!-- goclaw-source: cc510d92 | cập nhật: 2026-08-09 -->

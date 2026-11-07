@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="GoClaw Documentation — Enterprise AI Agent Platform built in Go. Architecture, API reference, WebSocket protocol, tools, channels, security." />
+  <meta property="og:title" content="GoClaw Docs — Enterprise AI Agent Platform" />
+  <meta property="og:description" content="Complete documentation for GoClaw: multi-agent gateway, 13+ LLM providers, WebSocket RPC, HTTP API, multi-tenant PostgreSQL." />
+  <meta property="og:type" content="website" />
+  <title>GoClaw Docs — Enterprise AI Agent Platform</title>
+
+  <!-- Tailwind CSS v3 CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- marked.js for markdown rendering -->
+  <script src="https://cdn.jsdelivr.net/npm/marked@15/marked.min.js"></script>
+
+  <!-- highlight.js for code syntax highlighting -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/styles/github-dark-dimmed.min.css" />
+  <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/highlight.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/languages/go.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/languages/sql.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/languages/bash.min.js"></script>
+
+  <!-- mermaid for diagrams -->
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+
+  <!-- Custom styles -->
+  <link rel="stylesheet" href="css/styles.css" />
+</head>
+<body>
+
+  <!-- ============================================================
+       NAVBAR
+       ============================================================ -->
+  <nav id="navbar">
+    <!-- Mobile sidebar toggle -->
+    <button id="mobile-sidebar-toggle" aria-label="Toggle sidebar">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <line x1="3" y1="6" x2="21" y2="6"/>
+        <line x1="3" y1="12" x2="21" y2="12"/>
+        <line x1="3" y1="18" x2="21" y2="18"/>
+      </svg>
+    </button>
+
+    <a href="/" class="nav-brand">
+      <span class="nav-brand-icon">G</span>
+      <span>GoClaw <span style="font-weight:500;color:var(--color-text-muted);font-size:0.85rem">Docs</span></span>
+    </a>
+
+    <!-- Search -->
+    <div class="search-container">
+      <svg class="search-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+      </svg>
+      <input type="text" id="search-input" class="search-input" placeholder="Search docs..." autocomplete="off" />
+      <div id="search-results" class="search-results"></div>
+    </div>
+
+    <div class="nav-links">
+      <div class="lang-toggle">
+        <button class="lang-btn active" data-lang-btn="en" aria-pressed="true">EN</button>
+        <button class="lang-btn" data-lang-btn="vi" aria-pressed="false">VI</button>
+        <button class="lang-btn" data-lang-btn="zh" aria-pressed="false">ZH</button>
+      </div>
+      <a href="https://goclaw.sh" class="nav-link" target="_blank" rel="noopener">Home</a>
+      <div class="copy-ai-dropdown">
+        <button class="copy-ai-btn" id="copy-ai-toggle">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+          Copy for AI
+          <svg class="copy-ai-chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
+        </button>
+        <div class="copy-ai-menu" id="copy-ai-menu">
+          <button class="copy-ai-item" data-action="copy-page">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+            <div><strong>Copy page</strong><span>Copy as Markdown — paste into any AI</span></div>
+          </button>
+          <button class="copy-ai-item" data-action="view-markdown">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+            <div><strong>View as Markdown</strong><span>View raw text version of this page</span></div>
+          </button>
+          <div class="copy-ai-separator">OPEN WITH AI</div>
+          <a class="copy-ai-item" data-action="open-chatgpt">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M22.28 9.37a5.93 5.93 0 0 0-.51-4.88 6 6 0 0 0-6.47-2.91A5.93 5.93 0 0 0 10.82 0a6 6 0 0 0-5.72 4.15A5.94 5.94 0 0 0 1.13 7.6a6 6 0 0 0 .74 7.03 5.93 5.93 0 0 0 .51 4.88 6 6 0 0 0 6.47 2.91A5.93 5.93 0 0 0 13.33 24a6 6 0 0 0 5.72-4.15 5.94 5.94 0 0 0 3.97-3.45 6 6 0 0 0-.74-7.03z"/></svg>
+            <div><strong>ChatGPT</strong><span>Opens with prompt pre-filled</span></div>
+          </a>
+          <a class="copy-ai-item" data-action="open-claude">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="10"/></svg>
+            <div><strong>Claude</strong><span>Copies to clipboard, then opens Claude</span></div>
+          </a>
+          <a class="copy-ai-item" data-action="open-perplexity">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+            <div><strong>Perplexity</strong><span>Opens with search pre-filled</span></div>
+          </a>
+          <a class="copy-ai-item" data-action="open-grok">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg>
+            <div><strong>Grok</strong><span>Copies to clipboard, then opens Grok</span></div>
+          </a>
+        </div>
+      </div>
+      <a href="https://github.com/nextlevelbuilder/goclaw-docs" class="github-btn" target="_blank" rel="noopener">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"/></svg>
+        GitHub
+      </a>
+    </div>
+  </nav>
+
+  <!-- ============================================================
+       SIDEBAR
+       ============================================================ -->
+  <aside id="sidebar">
+    <div class="sidebar-section">
+      <div class="sidebar-section-title" data-i18n="nav.getting-started">Getting Started</div>
+      <a class="sidebar-link" data-doc="what-is-goclaw">What is GoClaw?</a>
+      <a class="sidebar-link" data-doc="installation">Installation</a>
+      <a class="sidebar-link" data-doc="quick-start">Quick Start</a>
+      <a class="sidebar-link" data-doc="configuration">Configuration</a>
+      <a class="sidebar-link" data-doc="dashboard-tour">Dashboard Tour</a>
+      <a class="sidebar-link" data-doc="migrating-from-openclaw">Migrating from OpenClaw</a>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="sidebar-section-title" data-i18n="nav.core-concepts">Core Concepts</div>
+      <a class="sidebar-link" data-doc="how-goclaw-works">How GoClaw Works</a>
+      <a class="sidebar-link" data-doc="agents-explained">Agents Explained</a>
+      <a class="sidebar-link" data-doc="sessions-and-history">Sessions & History</a>
+      <a class="sidebar-link" data-doc="tools-overview">Tools Overview</a>
+      <a class="sidebar-link" data-doc="memory-system">Memory System</a>
+      <a class="sidebar-link" data-doc="multi-tenancy">Multi-Tenancy</a>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="sidebar-section-title" data-i18n="nav.agents">Agents</div>
+      <a class="sidebar-link" data-doc="creating-agents">Creating Agents</a>
+      <a class="sidebar-link" data-doc="open-vs-predefined">Open vs Predefined</a>
+      <a class="sidebar-link" data-doc="context-files">Context Files</a>
+      <a class="sidebar-link" data-doc="summoning-bootstrap">Summoning & Bootstrap</a>
+      <a class="sidebar-link" data-doc="editing-personality">Editing Personality</a>
+      <a class="sidebar-link" data-doc="sharing-and-access">Sharing & Access</a>
+      <a class="sidebar-link" data-doc="user-overrides">User Overrides</a>
+      <a class="sidebar-link" data-doc="system-prompt-anatomy">System Prompt Anatomy</a>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="sidebar-section-title" data-i18n="nav.providers">Providers</div>
+      <a class="sidebar-link" data-doc="providers-overview">Overview</a>
+      <a class="sidebar-link" data-doc="provider-anthropic">Anthropic</a>
+      <a class="sidebar-link" data-doc="provider-openai">OpenAI / Azure</a>
+      <a class="sidebar-link" data-doc="provider-openrouter">OpenRouter</a>
+      <a class="sidebar-link" data-doc="provider-gemini">Google Gemini</a>
+      <a class="sidebar-link" data-doc="provider-deepseek">DeepSeek</a>
+      <a class="sidebar-link" data-doc="provider-groq">Groq</a>
+      <a class="sidebar-link" data-doc="provider-mistral">Mistral</a>
+      <a class="sidebar-link" data-doc="provider-xai">xAI (Grok)</a>
+      <a class="sidebar-link" data-doc="provider-minimax">MiniMax</a>
+      <a class="sidebar-link" data-doc="provider-cohere">Cohere</a>
+      <a class="sidebar-link" data-doc="provider-perplexity">Perplexity</a>
+      <a class="sidebar-link" data-doc="provider-dashscope">DashScope (Qwen)</a>
+      <a class="sidebar-link" data-doc="provider-vertex">Vertex AI (Google Cloud)</a>
+      <a class="sidebar-link" data-doc="provider-bailian">Bailian</a>
+      <a class="sidebar-link" data-doc="provider-kimi">Kimi Coding</a>
+      <a class="sidebar-link" data-doc="provider-zai">Zai</a>
+      <a class="sidebar-link" data-doc="provider-claude-cli">Claude CLI</a>
+      <a class="sidebar-link" data-doc="provider-codex">Codex / ChatGPT</a>
+      <a class="sidebar-link" data-doc="provider-ollama">Ollama</a>
+      <a class="sidebar-link" data-doc="provider-ollama-cloud">Ollama Cloud</a>
+      <a class="sidebar-link" data-doc="provider-suno">Suno</a>
+      <a class="sidebar-link" data-doc="provider-yescale">YesScale</a>
+      <a class="sidebar-link" data-doc="provider-novita">Novita AI</a>
+      <a class="sidebar-link" data-doc="provider-acp">ACP</a>
+      <a class="sidebar-link" data-doc="provider-custom">Custom</a>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="sidebar-section-title" data-i18n="nav.channels">Channels</div>
+      <a class="sidebar-link" data-doc="channels-overview">Overview</a>
+      <a class="sidebar-link" data-doc="channel-telegram">Telegram</a>
+      <a class="sidebar-link" data-doc="channel-bitrix24">Bitrix24</a>
+      <a class="sidebar-link" data-doc="channel-discord">Discord</a>
+      <a class="sidebar-link" data-doc="channel-feishu">Feishu / Lark</a>
+      <a class="sidebar-link" data-doc="channel-larksuite">Larksuite</a>
+      <a class="sidebar-link" data-doc="channel-zalo-oa">Zalo OA</a>
+      <a class="sidebar-link" data-doc="channel-zalo-personal">Zalo Personal</a>
+      <a class="sidebar-link" data-doc="channel-slack">Slack</a>
+      <a class="sidebar-link" data-doc="channel-whatsapp">WhatsApp</a>
+      <a class="sidebar-link" data-doc="channel-pancake">Pancake</a>
+      <a class="sidebar-link" data-doc="channel-facebook">Facebook</a>
+      <a class="sidebar-link" data-doc="channel-websocket">WebSocket</a>
+      <a class="sidebar-link" data-doc="channel-browser-pairing">Browser Pairing</a>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="sidebar-section-title" data-i18n="nav.agent-teams">Agent Teams</div>
+      <a class="sidebar-link" data-doc="teams-what-are-teams">What Are Teams?</a>
+      <a class="sidebar-link" data-doc="teams-creating">Creating & Managing</a>
+      <a class="sidebar-link" data-doc="teams-task-board">Task Board</a>
+      <a class="sidebar-link" data-doc="teams-messaging">Team Messaging</a>
+      <a class="sidebar-link" data-doc="teams-delegation">Delegation & Handoff</a>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="sidebar-section-title" data-i18n="nav.advanced">Advanced</div>
+      <a class="sidebar-link" data-doc="custom-tools">Custom Tools</a>
+      <a class="sidebar-link" data-doc="mcp-integration">MCP Integration</a>
+      <a class="sidebar-link" data-doc="skills">Skills</a>
+      <a class="sidebar-link" data-doc="scheduling-cron">Scheduling & Cron</a>
+      <a class="sidebar-link" data-doc="heartbeat">Heartbeat</a>
+      <a class="sidebar-link" data-doc="sandbox">Sandbox</a>
+      <a class="sidebar-link" data-doc="media-generation">Media Generation</a>
+      <a class="sidebar-link" data-doc="tts-voice">TTS & Voice</a>
+      <a class="sidebar-link" data-doc="knowledge-graph">Knowledge Graph</a>
+      <a class="sidebar-link" data-doc="knowledge-vault">Knowledge Vault</a>
+      <a class="sidebar-link" data-doc="caching">Caching</a>
+      <a class="sidebar-link" data-doc="browser-automation">Browser Automation</a>
+      <a class="sidebar-link" data-doc="extended-thinking">Extended Thinking</a>
+      <a class="sidebar-link" data-doc="hooks-quality-gates">Hooks & Quality Gates</a>
+      <a class="sidebar-link" data-doc="authentication">Authentication & OAuth</a>
+      <a class="sidebar-link" data-doc="api-keys-rbac">API Keys & RBAC</a>
+      <a class="sidebar-link" data-doc="permission-matrix">Permission Matrix</a>
+      <a class="sidebar-link" data-doc="cli-credentials">CLI Credentials</a>
+      <a class="sidebar-link" data-doc="exec-approval">Exec Approval</a>
+      <a class="sidebar-link" data-doc="context-pruning">Context Pruning</a>
+      <a class="sidebar-link" data-doc="channel-instances">Channel Instances</a>
+      <a class="sidebar-link" data-doc="webhooks">Webhooks</a>
+      <a class="sidebar-link" data-doc="workstations">Workstations</a>
+      <a class="sidebar-link" data-doc="usage-quota">Usage & Quota</a>
+      <a class="sidebar-link" data-doc="cost-tracking">Cost Tracking</a>
+      <a class="sidebar-link" data-doc="model-steering">Model Steering</a>
+      <a class="sidebar-link" data-doc="agent-evolution">Agent Evolution</a>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="sidebar-section-title" data-i18n="nav.deployment">Deployment</div>
+      <a class="sidebar-link" data-doc="deploy-docker-compose">Docker Compose</a>
+      <a class="sidebar-link" data-doc="deploy-database">Database Setup</a>
+      <a class="sidebar-link" data-doc="deploy-security">Security Hardening</a>
+      <a class="sidebar-link" data-doc="deploy-observability">Observability</a>
+      <a class="sidebar-link" data-doc="deploy-tailscale">Tailscale</a>
+      <a class="sidebar-link" data-doc="deploy-checklist">Prod Checklist</a>
+      <a class="sidebar-link" data-doc="deploy-upgrading">Upgrading</a>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="sidebar-section-title" data-i18n="nav.recipes">Recipes</div>
+      <a class="sidebar-link" data-doc="recipe-personal-assistant">Personal Assistant</a>
+      <a class="sidebar-link" data-doc="recipe-team-chatbot">Team Chatbot</a>
+      <a class="sidebar-link" data-doc="recipe-customer-support">Customer Support</a>
+      <a class="sidebar-link" data-doc="recipe-code-review">Code Review Agent</a>
+      <a class="sidebar-link" data-doc="recipe-multi-channel">Multi-Channel Setup</a>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="sidebar-section-title" data-i18n="nav.showcases">Showcases</div>
+      <a class="sidebar-link" data-doc="gallery">Gallery</a>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="sidebar-section-title" data-i18n="nav.reference">Reference</div>
+      <a class="sidebar-link" data-doc="cli-commands">CLI Commands</a>
+      <a class="sidebar-link" data-doc="websocket-protocol">WebSocket Protocol</a>
+      <a class="sidebar-link" data-doc="rest-api">REST API</a>
+      <a class="sidebar-link" data-doc="reference-api-endpoints-catalog">API Endpoint Catalog</a>
+      <a class="sidebar-link" data-doc="config-reference">Config Reference</a>
+      <a class="sidebar-link" data-doc="env-vars">Environment Variables</a>
+      <a class="sidebar-link" data-doc="database-schema">Database Schema</a>
+      <a class="sidebar-link" data-doc="glossary">Glossary</a>
+
+      <div class="sidebar-subsection-title" data-i18n="nav.templates">Templates</div>
+      <a class="sidebar-link sidebar-link-nested" data-doc="template-agents">AGENTS.md</a>
+      <a class="sidebar-link sidebar-link-nested" data-doc="template-soul">SOUL.md</a>
+      <a class="sidebar-link sidebar-link-nested" data-doc="template-identity">IDENTITY.md</a>
+      <a class="sidebar-link sidebar-link-nested" data-doc="template-capabilities">CAPABILITIES.md</a>
+      <a class="sidebar-link sidebar-link-nested" data-doc="template-tools">TOOLS.md</a>
+      <a class="sidebar-link sidebar-link-nested" data-doc="template-user">USER.md</a>
+      <a class="sidebar-link sidebar-link-nested" data-doc="template-user-predefined">USER_PREDEFINED.md</a>
+      <a class="sidebar-link sidebar-link-nested" data-doc="template-bootstrap">BOOTSTRAP.md</a>
+      <a class="sidebar-link sidebar-link-nested" data-doc="template-team">TEAM.md</a>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="sidebar-section-title" data-i18n="nav.troubleshooting">Troubleshooting</div>
+      <a class="sidebar-link" data-doc="troubleshoot-common">Common Issues</a>
+      <a class="sidebar-link" data-doc="troubleshoot-channels">Channels</a>
+      <a class="sidebar-link" data-doc="troubleshoot-providers">Providers</a>
+      <a class="sidebar-link" data-doc="troubleshoot-websocket">WebSocket</a>
+      <a class="sidebar-link" data-doc="troubleshoot-mcp">MCP</a>
+      <a class="sidebar-link" data-doc="troubleshoot-database">Database</a>
+      <a class="sidebar-link" data-doc="troubleshoot-agent-teams">Agent Teams</a>
+    </div>
+
+    <div style="padding: 20px; margin-top: 12px; border-top: 1px solid var(--color-border);">
+      <div style="font-size:0.72rem; color:var(--color-text-dim);">
+        <span data-i18n="sidebar.llms">All docs available as</span><br/>
+        <a id="llms-link" href="llms.txt" target="_blank" style="color:var(--color-primary); text-decoration:none;">llms.txt</a>
+        &middot;
+        <a id="llms-full-link" href="llms-full.txt" target="_blank" style="color:var(--color-primary); text-decoration:none;">llms-full.txt</a>
+      </div>
+    </div>
+  </aside>
+
+  <!-- Sidebar overlay for mobile -->
+  <div id="sidebar-overlay"></div>
+
+  <!-- ============================================================
+       MAIN CONTENT
+       ============================================================ -->
+  <div class="layout">
+    <main id="content">
+      <div id="doc-content">
+        <div id="content-loading"><div class="spinner"></div>Loading...</div>
+      </div>
+    </main>
+  </div>
+
+  <!-- Table of Contents (right side) -->
+  <div id="toc"></div>
+
+  <!-- ============================================================
+       FOOTER
+       ============================================================ -->
+  <footer id="footer">
+    <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px;">
+      <span>GoClaw &mdash; Enterprise AI Agent Platform</span>
+      <span>
+        <a href="https://goclaw.sh" style="color:var(--color-text-muted); text-decoration:none;">goclaw.sh</a>
+      </span>
+    </div>
+  </footer>
+
+  <!-- App script -->
+  <script src="js/docs-app.js"></script>
+</body>
+</html>

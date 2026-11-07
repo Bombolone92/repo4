@@ -1,0 +1,162 @@
+# Discord Channel
+
+Discord bot integration via the Discord Gateway API. Supports DMs, servers, threads, and streaming responses via message editing.
+
+## Setup
+
+**Create a Discord Application:**
+1. Go to https://discord.com/developers/applications
+2. Click "New Application"
+3. Go to "Bot" tab → "Add Bot"
+4. Copy the token
+5. Ensure `Message Content Intent` is enabled under "Privileged Gateway Intents"
+
+**Add Bot to Server:**
+1. OAuth2 → URL Generator
+2. Select scopes: `bot`
+3. Select permissions: `Send Messages`, `Read Message History`, `Read Messages/View Channels`
+4. Copy the generated URL and open in browser
+
+**Enable Discord:**
+
+```json
+{
+  "channels": {
+    "discord": {
+      "enabled": true,
+      "token": "YOUR_BOT_TOKEN",
+      "dm_policy": "open",
+      "group_policy": "open",
+      "allow_from": ["alice_id", "bob_id"]
+    }
+  }
+}
+```
+
+## Configuration
+
+All config keys are in `channels.discord`:
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | bool | false | Enable/disable channel |
+| `token` | string | required | Bot token from Discord Developer Portal |
+| `allow_from` | list | -- | User ID allowlist |
+| `dm_policy` | string | `"open"` | `open`, `allowlist`, `pairing`, `disabled` |
+| `group_policy` | string | `"open"` | `open`, `allowlist`, `disabled` |
+| `require_mention` | bool | true | Require @bot mention in servers (channels) |
+| `history_limit` | int | 50 | Pending messages per channel (0=disabled) |
+| `block_reply` | bool | -- | Override gateway block_reply (nil=inherit) |
+| `chat_behavior` | object | -- | Override gateway [human-like delivery](/channels-overview#human-like-delivery) for this channel (nil = inherit) |
+
+## Features
+
+### Gateway Intents
+
+Automatically requests `GuildMessages`, `DirectMessages`, and `MessageContent` intents on startup.
+
+### Message Limits
+
+Discord enforces 2,000 characters per message. Responses longer than this are split at newline boundaries.
+
+### Placeholder Editing
+
+Bot sends "Thinking..." placeholder immediately, then edits it with the actual response. This provides visual feedback while the agent processes.
+
+```mermaid
+flowchart TD
+    SEND["Send 'Thinking...'<br/>placeholder"]
+    SEND --> PROCESS["Agent processes<br/>& streaming chunks"]
+    PROCESS --> EDIT["Edit message<br/>with response"]
+    EDIT --> DONE["Response complete"]
+```
+
+### Mention Gating
+
+In servers (channels), the bot requires being mentioned by default (`require_mention: true`). Pending messages are stored in a history buffer. When the bot is mentioned, history is included as context.
+
+**Group @mention detection:** A message is counted as an @mention when the bot's user ID appears in the `mentions` array of the Discord event, *or* when the message is a direct reply to one of the bot's own messages. Both conditions are checked before any policy or pairing logic runs.
+
+**Pairing replies in groups:** When `group_policy: "pairing"` is set and `require_mention: true` (the default), the bot only sends a pairing invite to an unpaired user if that user explicitly @mentioned the bot (or replied to the bot). Messages that do not address the bot are silently added to the group history buffer and never trigger a pairing reply. Set `require_mention: false` to send pairing invites unconditionally in groups (not recommended for public servers).
+
+### Typing Indicator
+
+While the agent processes, a typing indicator is shown (9-second keepalive). The typing indicator stops automatically after successful message delivery.
+
+### Thread Support
+
+The bot automatically detects and responds in Discord threads. Responses stay in the same thread.
+
+### Thread History Backfill
+
+When the bot is mentioned **inside a Discord thread**, GoClaw pulls in the recent thread context before answering — so a mid-thread mention isn't answered blind.
+
+- Fetches up to **25** prior thread messages (before the trigger) via the Discord REST API and prepends their text as context.
+- Downloads up to **15** prior attachments into the inbound media pipeline, bounded to **5 MB per file**.
+- The whole backfill is bounded by a **30-second** timeout.
+
+This is **thread-only**. If the bot is missing the `READ_MESSAGE_HISTORY` permission or the REST call fails, GoClaw falls back gracefully to just the current message.
+
+### Multi-File Delivery
+
+Discord delivers multiple files (plus optional text) in a **single message**, up to 10 attachments — so a batch `send_file` lands as one tidy message rather than a flood. See [Multi-Attachment Delivery](/channels-overview#multi-attachment-delivery-batching) in the overview.
+
+### Media from Replied-to Messages
+
+When a user replies to a message that contains media attachments, GoClaw extracts those attachments and includes them in the inbound message context. This lets the agent see and process media even when it was originally shared in a previous turn. Attachment source URLs are preserved in media tags, so agents can reference the original Discord CDN URL.
+
+### Group Media History
+
+Media files (images, video, audio) sent in group conversations are tracked in message history, allowing agents to reference previously shared media.
+
+### Bot Identity
+
+On startup, the bot fetches its own user ID via `@me` endpoint to avoid responding to its own messages.
+
+### Allowlist and Pairing Policy
+
+`dm_policy` and `group_policy` work as documented — `pairing`, `allowlist`, and `open` modes are handled exclusively by the policy evaluation layer. There is no additional allowlist gate after the policy check, so paired users are not wrongly rejected when an `allow_from` list is also configured. If a user is paired but also listed in `allow_from`, both conditions are satisfied and the message proceeds normally.
+
+### Group File Writer Management
+
+Discord supports slash-command-based management of group file writers (similar to Telegram's writer restriction). In server channels, write-sensitive operations can be restricted to designated writers:
+
+| Command | Description |
+|---------|-------------|
+| `/addwriter` | Add a group file writer (reply to target user) |
+| `/removewriter` | Remove a group file writer |
+| `/writers` | List current group file writers |
+
+Writers are managed per-group. The group ID format used internally is `group:discord:{channelID}`.
+
+## Common Patterns
+
+### Sending to a Channel
+
+```go
+manager.SendToChannel(ctx, "discord", "channel_id", "Hello!")
+```
+
+### Group Configuration
+
+Per-guild/channel overrides are not yet supported in the Discord channel implementation. Use global `allow_from` and policies.
+
+## Troubleshooting
+
+| Issue | Solution |
+|-------|----------|
+| Bot doesn't respond | Check bot has necessary permissions. Verify `require_mention` setting. Ensure bot can read messages (`Message Content Intent` enabled). |
+| "Unknown Application" error | Token is invalid or expired. Regenerate bot token. |
+| Placeholder editing fails | Ensure bot has `Manage Messages` permission. Discord may revoke this during setup. |
+| Message split incorrectly | Long responses are split at newlines. Control message length via model `max_tokens`. |
+| Bot mentions itself | Check Discord permissions. Bot should not have `@everyone` or `@here` in responses. |
+| Thread context missing | Thread history backfill needs `READ_MESSAGE_HISTORY`. Grant the permission; only works inside threads. |
+
+## What's Next
+
+- [Overview](/channels-overview) — Channel concepts and policies
+- [Telegram](/channel-telegram) — Telegram bot setup
+- [Larksuite](/channel-feishu) — Larksuite integration with streaming cards
+- [Browser Pairing](/channel-browser-pairing) — Pairing flow
+
+<!-- goclaw-source: fabe86b3 | updated: 2026-06-28 -->

@@ -1,0 +1,371 @@
+> 翻译自 [English version](/channel-telegram)
+
+# Telegram Channel
+
+通过长轮询（Bot API）集成 Telegram bot。支持 DM、群组、论坛话题、语音转文字和流式响应。
+
+## 设置
+
+**创建 Telegram Bot：**
+1. 在 Telegram 上向 @BotFather 发消息
+2. `/newbot` → 选择名称和用户名
+3. 复制 token（格式：`123456:ABCDEFGHIJKLMNOPQRSTUVWxyz...`）
+
+> **重要 — 群组隐私模式：** 默认情况下，Telegram bot 以**隐私模式**运行，在群组中只能看到命令（`/`）和 @提及。若要让 bot 读取所有群组消息（历史缓冲区、`require_mention: false` 和群组上下文所必需），请向 **@BotFather** 发送消息 → `/setprivacy` → 选择你的 bot → **Disable**。不执行此操作，bot 将静默忽略大多数群组消息。
+
+**启用 Telegram：**
+
+```json
+{
+  "channels": {
+    "telegram": {
+      "enabled": true,
+      "token": "YOUR_BOT_TOKEN",
+      "dm_policy": "pairing",
+      "group_policy": "open",
+      "allow_from": ["alice", "bob"]
+    }
+  }
+}
+```
+
+## 配置
+
+所有配置项位于 `channels.telegram`：
+
+| 配置项 | 类型 | 默认值 | 说明 |
+|-----|------|---------|-------------|
+| `enabled` | bool | false | 启用/禁用 channel |
+| `token` | string | 必填 | 来自 BotFather 的 Bot API token |
+| `proxy` | string | -- | HTTP 代理（如 `http://proxy:8080`） |
+| `allow_from` | list | -- | 用户 ID 或用户名白名单 |
+| `dm_policy` | string | `"pairing"` | `pairing`、`allowlist`、`open`、`disabled` |
+| `group_policy` | string | `"open"` | `open`、`allowlist`、`disabled` |
+| `require_mention` | bool | true | 群组中是否需要 @bot 提及 |
+| `mention_mode` | string | `"strict"` | `strict` = 仅在 @提及时响应；`yield` = 除非另一个 bot 被 @提及，否则响应（多 bot 群组） |
+| `history_limit` | int | 50 | 每个群组的待处理消息数（0=禁用） |
+| `dm_stream` | bool | false | 为 DM 启用流式输出（编辑占位符） |
+| `group_stream` | bool | false | 为群组启用流式输出（新消息） |
+| `draft_transport` | bool | false | 对 DM 流式使用 `sendMessageDraft`（静默预览，无逐条编辑通知） |
+| `reasoning_delivery` | string | -- | 推理如何呈现：`off`、`streaming_only`、`always_bubbles`。参见 [推理投递](#reasoning-delivery)。 |
+| `reasoning_stream` | bool | true | **Legacy。** 将推理 token 作为独立消息显示在答案前。仅当 `reasoning_delivery` 未设置时使用。 |
+| `block_reply` | bool | -- | 覆盖此 channel 的 gateway `block_reply` 设置（nil = 继承） |
+| `chat_behavior` | object | -- | 覆盖此 channel 的 gateway [拟人化投递](/channels-overview#human-like-delivery)（nil = 继承） |
+| `reaction_level` | string | `"off"` | `off`、`minimal`（仅 ⏳）、`full`（⏳💬🛠️✅❌🔄） |
+| `media_max_bytes` | int | 20MB | 媒体文件最大大小 |
+| `link_preview` | bool | true | 显示 URL 预览 |
+| `force_ipv4` | bool | false | 强制所有 Telegram API 连接使用 IPv4 |
+| `api_server` | string | -- | 自定义 Telegram Bot API 服务器 URL（如 `http://localhost:8081`） |
+| `stt_proxy_url` | string | -- | STT 服务 URL（用于语音转写） |
+| `stt_api_key` | string | -- | STT 代理的 Bearer token |
+| `stt_timeout_seconds` | int | 30 | STT 转写请求超时 |
+| `voice_agent_id` | string | -- | 将语音消息路由到指定 agent |
+
+**媒体上传大小**：`media_max_bytes` 字段对 agent 发送的出站媒体上传设置硬限制（默认 20 MB）。超出限制的文件将被静默跳过并记录日志。不影响从用户接收的入站媒体。
+
+## 群组配置
+
+使用 `groups` 对象覆盖每个群组（及每个话题）的设置。
+
+```json
+{
+  "channels": {
+    "telegram": {
+      "token": "...",
+      "groups": {
+        "-100123456789": {
+          "group_policy": "allowlist",
+          "allow_from": ["@alice", "@bob"],
+          "require_mention": false,
+          "topics": {
+            "42": {
+              "require_mention": true,
+              "tools": ["web_search", "file_read"],
+              "system_prompt": "You are a research assistant."
+            }
+          }
+        },
+        "*": {
+          "system_prompt": "Global system prompt for all groups."
+        }
+      }
+    }
+  }
+}
+```
+
+群组配置项：
+
+- `group_policy` — 覆盖群组级策略
+- `allow_from` — 覆盖白名单
+- `require_mention` — 覆盖提及要求
+- `mention_mode` — 覆盖提及模式（`strict` 或 `yield`）
+- `skills` — 白名单技能（nil=全部，[]=无）
+- `tools` — 白名单工具（支持 `group:xxx` 语法）
+- `system_prompt` — 此群组的额外系统提示
+- `topics` — 每个话题的覆盖配置（key 为话题/线程 ID）
+
+## 功能特性
+
+### 提及过滤
+
+在群组中，bot 默认只响应提及它的消息（`require_mention: true`）。未提及时，消息存入待处理历史缓冲区（默认 50 条），当 bot 被提及时作为上下文包含。回复 bot 的消息也算作提及。
+
+#### 提及模式
+
+| 模式 | 行为 | 适用场景 |
+|------|----------|----------|
+| `strict`（默认） | 仅在 @提及或被回复时响应 | 单 bot 群组 |
+| `yield` | 响应所有消息，除非另一个 bot/用户被 @提及 | 多 bot 共享群组 |
+
+**Yield 模式**让多个 bot 共存于同一群组而不冲突：
+- Bot 响应所有未指定 @提及其他 bot 的消息
+- 如果用户 @提及了不同的 bot，此 bot 保持沉默（yield）
+- 其他 bot 的消息自动跳过，防止 bot 间无限循环
+- 跨 bot @命令仍然有效（如另一个 bot 发送 `@my_bot help`）
+
+```json
+{
+  "channels": {
+    "telegram": {
+      "mention_mode": "yield",
+      "require_mention": false
+    }
+  }
+}
+```
+
+```mermaid
+flowchart TD
+    MSG["用户在群组中发消息"] --> MODE{"mention_mode?"}
+    MODE -->|strict| MENTION{"Bot 被 @提及<br/>或被回复?"}
+    MODE -->|yield| OTHER{"另一个 bot/用户<br/>被 @提及?"}
+    OTHER -->|是| YIELD["Yield — 保持沉默"]
+    Other -->|否| PROCESS
+    MENTION -->|否| BUFFER["加入待处理历史<br/>（最多 50 条）"]
+    MENTION -->|是| PROCESS["立即处理<br/>包含历史作为上下文"]
+    BUFFER --> NEXT["下次提及时：<br/>包含历史"]
+```
+
+### System Prompt 中的 bot 自身信息
+
+启动时，GoClaw 解析 bot 的 Telegram 用户名和显示名，并将一段简短的自身标识信息注入 agent 的 system prompt：
+
+```
+You are @mybot (My Bot) on this Telegram channel.
+```
+
+这让 agent 知道自己的 handle，从而能正确识别群组会话中的 @提及 — 在多 bot 群组中尤为重要，因为其他 bot 的 @提及在去除 bot 自身 mention 后仍会保留在消息内容中。
+
+### 去除入站消息中的 @mention
+
+在将消息内容传递给 agent 之前，GoClaw 会从文本中去除 bot 自身的 `@username`。这样 agent 接收到的是干净的输入，不含自己的 handle。例如，用户消息 `"@mybot 今天天气怎么样？"` 传达给 agent 时会变为 `"今天天气怎么样？"`。
+
+其他 bot 的 @提及会被刻意保留，以便 agent 检测跨 bot 的交互。
+
+### 群聊消息标注
+
+在群聊中，每条消息都添加 `[From:]` 前缀，让 agent 知道谁在发言：
+
+```
+[From: @username (显示名)]
+消息内容
+```
+
+标签格式取决于可用的用户数据：
+- 用户名 + 显示名：`@username (显示名)`
+- 仅用户名：`@username`
+- 仅显示名：`显示名`
+
+DM 消息也会添加此标注，以保持一致的发送者识别。
+
+### 群组并发
+
+群组 session 支持最多 **3 个并发 agent 运行**。达到上限时，额外消息进入队列。适用于所有群组和论坛话题场景。
+
+### 论坛话题
+
+为每个论坛话题配置 bot 行为：
+
+| 方面 | 配置项 | 示例 |
+|--------|-----|---------|
+| 话题 ID | Chat ID + 话题 ID | `-12345:topic:99` |
+| 配置查找 | 分层合并 | 全局 → 通配符 → 群组 → 话题 |
+| 工具限制 | `tools: ["web_search"]` | 话题内仅限 web 搜索 |
+| 额外提示 | `system_prompt` | 话题专属指令 |
+
+### 消息格式化
+
+Markdown 输出转换为 Telegram HTML 并正确转义：
+
+```
+LLM 输出（Markdown）
+  → 提取表格/代码 → 转换 Markdown 为 HTML
+  → 恢复占位符 → 按 4,000 字符分块
+  → 以 HTML 发送（回退：纯文本）
+```
+
+表格在 `<pre>` 标签中渲染为 ASCII。CJK 字符按 2 列宽度计算。
+
+### 语音转文字（STT）
+
+语音和音频消息可以转写：
+
+```json
+{
+  "channels": {
+    "telegram": {
+      "stt_proxy_url": "https://stt.example.com",
+      "stt_api_key": "sk-...",
+      "stt_timeout_seconds": 30,
+      "voice_agent_id": "voice_assistant"
+    }
+  }
+}
+```
+
+当用户发送语音消息时：
+1. 从 Telegram 下载文件
+2. 以 multipart 形式（文件 + tenant_id）发送到 STT 代理
+3. 转写文本前置到消息：`[audio: filename] Transcript: text`
+4. 若配置了 `voice_agent_id` 则路由到该 agent，否则使用默认 agent
+
+转写通过 GoClaw 统一的 STT chain 进行，它按顺序尝试 provider — 先 `elevenlabs`，再 `proxy`。（这些是当前的 provider 名称；较旧的版本称它们为 `elevenlabs_scribe` 和 `proxy_stt`。）Telegram 在把音频转发给 chain 时会保留原始的语音 MIME 类型，而 legacy 的 STT-proxy 桥接覆盖以平台类型 `telegram` 作为键。
+
+### 流式输出
+
+启用实时响应更新：
+
+- **DM**（`dm_stream`）：随分块到达编辑"Thinking..."占位符。默认使用 `sendMessage+editMessageText`；设置 `draft_transport: true` 可使用 `sendMessageDraft`（静默预览，无逐条编辑通知，但在某些客户端可能出现"回复已删除消息"的问题）。
+- **群组**（`group_stream`）：发送占位符，以完整响应编辑
+
+默认禁用。
+
+### 推理投递
+
+当模型发出推理（"thinking"）token 时，`reasoning_delivery` 控制这些推理是否以及如何出现在聊天中：
+
+| `reasoning_delivery` | 行为 |
+|----------------------|----------|
+| `streaming_only` | 推理只出现在实时流式通道中（legacy 行为）。 |
+| `always_bubbles` | 在内部强制 provider 流式，并将推理作为有界的普通"气泡"消息发送 — 即使 `dm_stream` / `group_stream` 关闭也是如此。最终答案仍以非流式方式投递。 |
+| `off` | 在该 channel 中抑制推理。trace 和用量统计不受影响。 |
+
+**向后兼容。** 当 `reasoning_delivery` 未设置时，legacy 的 `reasoning_stream` 布尔值生效：`reasoning_stream: false` 解析为 `off`，否则解析为 `streaming_only`。显式的 `reasoning_delivery` 值总是优先于 legacy 布尔值。
+
+推理气泡是仅投递层面的 — 它们不会被加入 assistant/session 历史。Telegram 目前是唯一实现此控制（`ReasoningDeliveryChannel`）的 channel。
+
+### 媒体处理
+
+**相册 / 多附件合并。** 当用户发送一个相册（在客户端上分组的多张图片或文件）时，Telegram 会把它作为 N 个独立 update 投递，它们共享同一个 `MediaGroupID`。GoClaw 在 channel 层缓冲相册成员（500 ms 静默窗口），并将它们合成为**一条**入站消息，因此 agent 回复一次而非每个附件回复一次。缓冲键为 `(chatID, MediaGroupID)`；发送者在第一个成员处被固定，发送者不匹配的成员会作为防御措施被丢弃。
+
+**出站相册批量。** 当 agent 一次发送多个文件时 — 通过 `send_file` 工具的 `attachments: [{path, caption?}, ...]` 形式 — Telegram 把兼容的出站媒体分组为 `sendMediaGroup` 相册分块，每组 **2–10** 项。图片和视频可以共用一个分块；文档只与文档分组，音频只与音频分组。语音模式音频、单项分块、回退为以文档发送的超大图片，以及其他不兼容的序列会优雅降级为有序的逐个发送。文件顺序、MIME 类型、文件名和 caption 都会被保留。
+
+**出站上传限制。** 出站媒体在发送前会针对上传上限做校验 — 超限文件会以明确的 "outbound media too large" 错误被拒绝，而不是在上传中途失败。官方 Bot API 上限为 50 MB，配置本地 Bot API server（`api_server`）时为 200 MB（若 `media_max_bytes` 调高到该值以上则更高）。
+
+**保留 archive 路径。** 入站文件在持久化时保留其原始扩展名（例如一个 `codex.zip` 上传仍是 `.zip`，而不是被改写成通用名称），因此 skill 和文档工具可以在下游正确识别并解压 archive。
+
+### 表情回应
+
+在用户消息上显示 emoji 状态。设置 `reaction_level`：
+
+> Typing 指示器回应现在具有更好的错误恢复——无效的回应类型会被优雅捕获，不再导致错误。
+
+- `off` — 无回应（默认）
+- `minimal` — 仅终态（完成/错误）
+- `full` — 所有状态转换，带去抖和停滞检测
+
+**状态 → 表情映射**（在聊天中使用 `/reactions` 查看此图例）：
+
+| Status | Emoji | 描述 |
+|--------|-------|-------------|
+| queued | 👀 | 等待处理 |
+| thinking | 🤔 | 正在处理你的请求 |
+| tool | ✍ | 正在执行工具 |
+| coding | 👨‍💻 | 正在运行代码 |
+| web | ⚡ | 浏览 / API 调用 |
+| done | 👍 | 已完成 |
+| error | 💔 | 出错了 |
+| stallSoft | 🥱 | 10 秒无活动 |
+| stallHard | 😨 | 30 秒无活动 |
+
+每个状态都有备选 emoji 变体，以防主 emoji 被聊天的允许回应列表限制。中间状态（thinking、tool 等）以 700ms 去抖以避免回应刷屏。
+
+> **无占位的工具状态文本。** 确定性的工具状态更新只通过表情回应呈现 — 它们不再在 channel 中发出单独的"tool"文本消息。平台表情回应和显式的推理投递仍是相互独立的行为。
+
+### Bot 命令
+
+消息增强前处理的命令：
+
+| 命令 | 行为 | 权限限制 |
+|---------|----------|-----------|
+| `/help` | 显示命令列表 | -- |
+| `/start` | 透传到 agent | -- |
+| `/stop` | 取消当前运行 | -- |
+| `/stopall` | 取消所有运行 | -- |
+| `/reset` | 清除 session 历史 | 仅 Writer |
+| `/status` | Bot 状态 + 用户名 | -- |
+| `/tasks` | 团队任务列表 | -- |
+| `/task_detail <id>` | 查看任务 | -- |
+| `/subagents` | 列出所有活跃 subagent 任务及其状态 | -- |
+| `/subagent <id>` | 从数据库查看 subagent 任务详情 | -- |
+| `/reactions` | 显示反应表情图例（状态 → 表情映射） | -- |
+| `/addwriter` | 添加群组文件 writer | 仅 Writer |
+| `/removewriter` | 移除群组文件 writer | 仅 Writer |
+| `/writers` | 列出群组 writer | -- |
+
+Writer 是允许执行敏感命令（`/reset`、文件写入）的群组成员。通过 `/addwriter` 和 `/removewriter`（回复目标用户）管理。
+
+## 网络隔离
+
+每个 Telegram 实例维护独立的 HTTP transport——bot 间不共享连接池。防止跨 bot 争用，支持每账号独立网络路由。
+
+| 选项 | 默认值 | 说明 |
+|--------|---------|-------------|
+| `force_ipv4` | false | 强制所有连接使用 IPv4。适用于需要固定路由或 IPv6 故障/被封锁的场景。 |
+| `proxy` | -- | 此 bot 实例专用的 HTTP 代理 URL（如 `http://proxy:8080`）。 |
+| `api_server` | -- | 自定义 Telegram Bot API 服务器。适用于本地 Bot API 服务器或私有部署。 |
+
+**固定 IPv4 回退**：当 `force_ipv4: true` 时，dialer 在启动时锁定为 `tcp4`，确保所有 Telegram 请求使用一致的源 IP。有助于在 IPv6 不稳定的环境中管理频率限制。
+
+```json
+{
+  "channels": {
+    "telegram": {
+      "token": "...",
+      "force_ipv4": true,
+      "proxy": "http://proxy.example.com:8080",
+      "api_server": "http://localhost:8081"
+    }
+  }
+}
+```
+
+## Group 升级为 Supergroup
+
+当 Telegram group 升级为 supergroup 时，chat ID 会改变。GoClaw 自动处理此过程：
+
+- **入站检测** — 收到 `MigrateToChatID` 消息时，GoClaw 原子性更新所有 DB 引用（paired_devices、sessions、channel_contacts）并清除内存缓存
+- **发送重试** — 若发送失败（因 group 已迁移），GoClaw 从 Telegram API 错误中检测新 chat ID，更新 DB 并自动重试
+- **幂等** — 多次触发安全；重复迁移为无操作
+
+无需配置。排查时查看日志中的 `telegram: migrating group chat` 条目。
+
+## 故障排查
+
+| 问题 | 解决方案 |
+|-------|----------|
+| Bot 在群组中不响应 | 确保通过 @BotFather 禁用了隐私模式（`/setprivacy` → Disable）。然后检查 `require_mention=true`（默认）——提及 bot 或回复其消息。对于多 bot 群组，尝试 `mention_mode: "yield"`。 |
+| 媒体下载失败 | 验证 bot 在 @BotFather 中启用了"Can read all group messages"（`/setprivacy` → Disable）。检查 `media_max_bytes` 限制。 |
+| STT 转写缺失 | 验证 STT 代理 URL 和 API key。检查日志中的超时记录。 |
+| 流式输出不工作 | 启用 `dm_stream` 或 `group_stream`。确保 provider 支持流式输出。 |
+| 话题路由失败 | 检查配置中的话题 ID（整数线程 ID）。通用话题（ID=1）在 Telegram API 中被移除。 |
+
+## 下一步
+
+- [概览](/channels-overview) — Channel 概念、策略和[入站防抖](/channels-overview#inbound-debounce)
+- [Discord](/channel-discord) — Discord bot 设置
+- [Browser Pairing](/channel-browser-pairing) — 配对流程
+- [Sessions & History](../core-concepts/sessions-and-history.md) — 会话历史
+
+<!-- goclaw-source: fabe86b3 | 更新: 2026-06-28 -->

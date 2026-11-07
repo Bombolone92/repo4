@@ -1,0 +1,167 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1707552000000,
+      "tag": "0000_initial-schema",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1707552001000,
+      "tag": "0001_fts5-fulltext-search",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1707552002000,
+      "tag": "0002_better-auth-tables",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1770884551066,
+      "tag": "0003_add-github-stars",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1770886696629,
+      "tag": "0004_stormy_true_believers",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1770888486129,
+      "tag": "0005_crazy_kate_bishop",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1772700411636,
+      "tag": "0006_same_mikhail_rasputin",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1772700411700,
+      "tag": "0007_add-votes-table",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1772900000000,
+      "tag": "0008_add-skill-references",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1789979864442,
+      "tag": "0009_brave_sally_floyd",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1789982954304,
+      "tag": "0010_sour_runaways",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "6",
+      "when": 1791866720909,
+      "tag": "0011_release_tree_digest",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "6",
+      "when": 1791898098113,
+      "tag": "0012_api_key_scopes",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "6",
+      "when": 1791903211047,
+      "tag": "0013_release_state_audit",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "6",
+      "when": 1791992385009,
+      "tag": "0014_release_status_and_exec",
+      "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "6",
+      "when": 1791994090168,
+      "tag": "0015_personal_kits",
+      "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "6",
+      "when": 1791994326116,
+      "tag": "0016_personal_kit_proposals",
+      "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "6",
+      "when": 1792066514896,
+      "tag": "0010_greedy_famine",
+      "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "6",
+      "when": 1792412883490,
+      "tag": "0018_registry_publishing",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "6",
+      "when": 1792412951303,
+      "tag": "0019_collection_revision_lineage",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "6",
+      "when": 1792464094499,
+      "tag": "0020_collection_moderation",
+      "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "6",
+      "when": 1793294428991,
+      "tag": "0021_agentkit_links",
+      "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "6",
+      "when": 1793297813420,
+      "tag": "0022_creator_dashboard",
+      "breakpoints": true
+    }
+  ]
+}

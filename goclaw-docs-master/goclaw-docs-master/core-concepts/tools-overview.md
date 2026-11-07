@@ -1,0 +1,437 @@
+# Tools Overview
+
+> The 50+ built-in tools agents can use, organized by category.
+
+## Overview
+
+Tools are how agents interact with the world beyond generating text. An agent can search the web, read files, run code, query memory, collaborate via agent teams, and more. GoClaw includes 50+ built-in tools (extensible via MCP and custom tools per agent) across 14 categories.
+
+## Tool Categories
+
+| Category | Tools | What They Do |
+|----------|-------|-------------|
+| **Filesystem** (`group:fs`) | read_file, write_file, edit, list_files, search, glob, send_file | Read, write, edit, and search files in the agent workspace; `send_file` delivers an existing file as an attachment |
+| **Runtime** (`group:runtime`) | exec, credentialed_exec | Run shell commands; execute CLI tools with injected credentials |
+| **Web** (`group:web`) | web_search, web_fetch | Search the web (Exa, Tavily, Brave, DuckDuckGo) and fetch pages |
+| **Memory** (`group:memory`) | memory_search, memory_get, memory_expand | Query long-term memory (hybrid vector + FTS search); expand full episodic content by ID (L2 retrieval) |
+| **Knowledge** (`group:knowledge`) | vault_search, knowledge_graph_search, skill_search | Unified vault/memory/knowledge-graph search; search entities and relationships; discover skills |
+| **Vault** (`group:vault`) | vault_search, vault_read | Search and read vault documents; governed by the `group:vault` policy group |
+| **Sessions** (`group:sessions`) | sessions_list, sessions_history, sessions_send, session_status, spawn | Manage conversation sessions; spawn subagents |
+| **Teams** (`group:teams`) | team_tasks, team_message | Collaborate with agent teams via shared task board and mailbox |
+| **Automation** (`group:automation`) | cron, datetime, wait | Schedule recurring jobs; get current date/time; pause execution between tool calls (`wait` — see below) |
+| **Messaging** (`group:messaging`) | message, create_forum_topic | Send messages; create Telegram forum topics |
+| **Media Generation** (`group:media_gen`) | create_image, create_image_byteplus, create_audio, create_video, create_video_byteplus, tts, image_generation | Generate images, audio, video, and text-to-speech; `image_generation` is a native tool for Codex/OpenAI-compat (tri-level gate: provider capability + `other_config.allow_image_generation` + header `x-goclaw-no-image-gen`) — see [Media Generation](/advanced/media-generation) |
+| **Browser** | browser | Navigate web pages, take screenshots, interact with elements |
+| **Media Reading** (`group:media_read`) | read_image, read_audio, read_document, read_video | Analyze images (file, attachment, or URL), transcribe audio, extract documents (PDF, DOCX, images; optional local-first extraction via pdftotext/pandoc), analyze video (file or URL) — see [Media Generation](/advanced/media-generation) |
+| **Skills** (`group:skills`) | use_skill, publish_skill | Invoke and publish skills |
+| **Workspace** | workspace_dir | Resolve workspace directory for team/user context |
+| **AI** | openai_compat_call | Call OpenAI-compatible endpoints with custom request formats |
+
+### web_search Providers
+
+`web_search` supports four providers, tried in order:
+
+| Provider | Notes |
+|----------|-------|
+| **Exa** | Requires `EXA_API_KEY` |
+| **Tavily** | Requires `TAVILY_API_KEY` |
+| **Brave** | Requires `BRAVE_API_KEY` |
+| **DuckDuckGo** | Free fallback — used last if no API keys for the others |
+
+> **Breaking change (v3.2+):** `config.json5 tools.web.*` has been removed. Configuration is now tenant-only. Existing keys are auto-migrated on first startup (data hook 055).
+
+Configure `web_search` via the dashboard (**Config → Tools → Web Search**) or the API:
+
+```bash
+# Set provider order via tenant-config API
+PUT /v1/tools/builtin/web_search/tenant-config
+{
+  "provider_order": ["exa", "tavily", "brave", "duckduckgo"],
+  "brave": { "enabled": true, "max_results": 5 },
+  "exa": { "enabled": false }
+}
+```
+
+DuckDuckGo requires no API key and is always available as the final fallback — it cannot be disabled.
+
+### v3 Memory & Vault Tools
+
+**Memory layers** (v3 two-tier retrieval):
+
+| Tool | Layer | Description |
+|------|-------|-------------|
+| `memory_search` | L1 | BM25 + vector hybrid search; returns abstracts and scores |
+| `memory_expand` | L2 | Load full episodic summary by ID from `memory_search` results |
+
+Use `memory_search` first to discover relevant episodic IDs, then `memory_expand` for the complete content. This saves tokens when only a few entries are relevant.
+
+**Vault linking** is now handled automatically by the enrichment pipeline. See [Knowledge Vault](../advanced/knowledge-vault.md).
+
+> `vault_link` and `vault_backlinks` have been removed. Explicit wikilink creation and backlink tracing are no longer needed — the enrichment pipeline manages document relationships automatically.
+
+**BytePlus media tools** (`create_image_byteplus`, `create_video_byteplus`) are available when a `byteplus` provider is configured. Both use async job polling: image generation via Seedream returns a URL once the job completes; video generation via Seedance polls `/text-to-video-pro/status/{id}` for the result.
+
+> Additional tools like `mcp_tool_search` and channel-specific tools are registered dynamically. Tool groups can be referenced with `group:` prefix in allow/deny lists (e.g., `group:fs`).
+
+> **Delegation note**: The `delegate` tool has been removed. Delegation is now handled exclusively via agent teams: leads create tasks on the shared board (`team_tasks`) and delegate to member agents via `spawn`. See [Agent Teams](#agent-teams) for the current model.
+
+### `wait` — Pause Between Tool Calls
+
+The built-in `wait` tool suspends the current agent's tool sequence for a bounded duration. It is useful for rate-limit spacing, polling intervals, or waiting for an external async job to finish before the next tool call.
+
+| Field | Type | Notes |
+|------|------|-------|
+| `timeMs` | integer (required) | Duration in milliseconds. Default bounds: `100` ≤ `timeMs` ≤ `300000` (5 minutes). |
+| `reason` | string (optional) | Free-form reason logged with the wait result; useful in traces and debugging. |
+
+The minimum and maximum bounds can be tuned per-deployment via the tool's runtime config; defaults are 100 ms and 300 000 ms.
+
+> **Not the same as `spawn(action=wait)`:** `wait` is a top-level built-in tool that pauses **the calling agent** for `timeMs` milliseconds. The `spawn(action=wait)` pattern (also called **WaitAll**, see below) is a delegation primitive that blocks the parent **until previously spawned subagents finish**. Use `wait` for time-based pauses; use `spawn(action=wait)` for fan-out/fan-in delegation.
+
+### `read_document` Local-First Extraction
+
+`read_document` analyzes PDF, DOCX, and images of documents. By default it sends the file to a cloud vision provider. You can opt into **local-first extraction** that runs `pdftotext` (PDF) and `pandoc --sandbox` (DOCX) on the host *before* any cloud call, configured via the `document_parser` block:
+
+```json
+{
+  "local_first": false,
+  "max_pages": 200,
+  "timeout_sec": 30,
+  "min_text_len": 16
+}
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `local_first` | `false` | Enable local extraction (opt-in). Requires `pdftotext`/`pandoc` on PATH — present in the `full` Docker variant or builds with `ENABLE_FULL_SKILLS=true` |
+| `max_pages` | `200` | PDF page limit; passed to `pdftotext -l` |
+| `timeout_sec` | `30` | Per-extraction timeout; the process group is killed on timeout |
+| `min_text_len` | `16` | Minimum characters (after trim) for a successful extraction; shorter output triggers cloud fallback |
+
+Config is captured at startup (not hot-reloaded), but binary availability is re-checked per call so a runtime install is detected without a restart. Any extraction miss — disabled, unsupported MIME, missing binary, timeout, or too-little text (e.g. a scanned image-only PDF) — transparently falls back to the cloud vision chain with no caller-visible difference.
+
+## Tool Execution Flow
+
+When an agent calls a tool:
+
+```mermaid
+graph LR
+    A[Agent calls tool] --> C[Inject context<br/>channel, user, session]
+    C --> R[Rate limit check]
+    R --> E[Execute tool]
+    E --> S[Scrub credentials]
+    S --> L[Return to LLM]
+```
+
+1. **Context injection** — Channel, chat ID, user ID, and sandbox key are injected
+2. **Rate limit** — Per-session rate limiter prevents abuse
+3. **Execute** — The tool runs and produces output
+4. **Scrub** — Credentials and sensitive data are removed from output
+5. **Return** — Clean result goes back to the LLM for the next iteration
+
+### Parallel vs Sequential Scheduling
+
+When the LLM emits **multiple** tool calls in one turn, GoClaw decides whether to run them concurrently. Only registered **read-only** tools are eligible for bounded-parallel raw I/O. Mutating, async, MCP-bridged (`mcp_*`), `exec`/`bash`, `wait`, unknown/unregistered tools, and batches that exceed the tool-call budget run **sequentially**. A mixed batch containing any ineligible call runs entirely sequentially. `PreToolUse` hooks run before any parallel execution, and results are always processed in the original assistant order. This eligibility is driven by each tool's capability metadata (the side-effect class), so custom tools default to sequential unless registered read-only.
+
+## Tool Profiles
+
+Profiles control which tools an agent can access:
+
+| Profile | Available Tools |
+|---------|----------------|
+| `full` | All registered tools (no restriction) |
+| `coding` | `group:fs`, `group:runtime`, `group:sessions`, `group:memory`, `group:web`, `group:knowledge`, `group:media_gen`, `group:media_read`, `group:skills` |
+| `messaging` | `group:messaging`, `group:web`, `group:sessions`, `group:media_read`, `skill_search` |
+| `minimal` | `session_status` only |
+
+Set the profile in agent config:
+
+```jsonc
+{
+  "agents": {
+    "defaults": {
+      "tools_profile": "full"
+    },
+    "list": {
+      "readonly-bot": {
+        "tools_profile": "messaging"
+      }
+    }
+  }
+}
+```
+
+## Tool Aliases
+
+GoClaw registers aliases so agents can reference tools by alternative names. This enables compatibility with Claude Code skills and legacy tool names:
+
+| Alias | Maps to |
+|-------|---------|
+| `Read` | `read_file` |
+| `Write` | `write_file` |
+| `Edit` | `edit` |
+| `Bash` | `exec` |
+| `WebFetch` | `web_fetch` |
+| `WebSearch` | `web_search` |
+| `edit_file` | `edit` |
+
+Aliases appear as one-line descriptions in the system prompt. They are not separate tools — calling an alias invokes the underlying tool.
+
+### Deterministic Ordering
+
+All tool names, aliases, and MCP tool descriptions are sorted lexicographically before being included in the system prompt. This ensures identical prompt prefixes across requests, maximizing LLM prompt cache hit rates (Anthropic and OpenAI cache by exact prefix match).
+
+## Policy Engine
+
+Beyond profiles, a 7-step policy engine gives fine-grained control:
+
+1. Global profile (base set)
+2. Provider-specific profile override
+3. Global allow list (intersection)
+4. Provider-specific allow override
+5. Per-agent allow list
+6. Per-agent per-provider allow
+7. Group-level allow
+
+After allow lists, **deny lists** remove tools, then **alsoAllow** adds them back (union). Tool groups (`group:fs`, `group:runtime`, etc.) can be used in any allow/deny list.
+
+### Example: Restrict an Agent
+
+```jsonc
+{
+  "agents": {
+    "list": {
+      "safe-bot": {
+        "tools_profile": "full",
+        "tools_deny": ["exec", "write_file"],
+        "tools_also_allow": ["read_file"]
+      }
+    }
+  }
+}
+```
+
+## Filesystem Interceptors
+
+Two special interceptors route file operations to the database:
+
+### Context File Interceptor
+
+When an agent reads/writes context files (SOUL.md, IDENTITY.md, AGENTS.md, USER.md, USER_PREDEFINED.md, BOOTSTRAP.md, HEARTBEAT.md), the operation is routed to the `user_context_files` table instead of the filesystem. TOOLS.md is explicitly excluded from routing. This enables per-user customization and multi-tenant isolation.
+
+### Memory Interceptor
+
+Writes to `MEMORY.md`, `memory.md`, or `memory/*` are routed to the `memory_documents` table, automatically chunked and embedded for search.
+
+## Shell Safety
+
+### `credentialed_exec` — Secure CLI Credential Injection
+
+The `credentialed_exec` tool runs CLI tools (gh, gcloud, aws, kubectl, terraform) with credentials auto-injected as environment variables directly into the child process — no shell, no credential leakage. Security layers: path verification (blocks `./gh` spoofing), shell operator blocking (`;`, `|`, `&&`), per-binary deny patterns (e.g., block `auth\s+`), and output scrubbing.
+
+A registered secure-CLI binary is gated even when reached through the plain `exec` tool: if the agent has no grant for it, `exec` refuses with `Binary "<name>" requires a secure CLI grant. Ask admin to grant access to this agent.` rather than running it with the host environment. The gate also unwraps shell wrappers (`sh -c`, `bash -c`, `env …`) up to 3 levels deep and fails closed if the grant lookup is unavailable.
+
+**Windows environment inheritance:** On Windows, credentialed exec inherits system environment variables required by native CLIs — `SYSTEMROOT`, `SYSTEMDRIVE`, `WINDIR`, `COMSPEC`, `PATHEXT`, `TEMP`, `TMP`, `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`, and `PROGRAMFILES`. These are non-secret runtime variables that most Win32 programs need to function. Credential values are still injected separately and scrubbed from output.
+
+### `exec` — Shell Safety
+
+The `exec` tool enforces 15 deny groups — all enabled by default:
+
+| Group | Blocked Patterns |
+|-------|-----------------|
+| `destructive_ops` | `rm -rf`, `del /f`, `mkfs`, `dd`, `shutdown`, fork bombs |
+| `data_exfiltration` | `curl\|sh`, `wget\|sh`, DNS exfil, `/dev/tcp/`, curl POST/PUT, localhost access |
+| `reverse_shell` | `nc`/`ncat`/`netcat`, `socat`, `openssl s_client`, `telnet`, python/perl/ruby/node sockets, `mkfifo` |
+| `code_injection` | `eval $`, `base64 -d\|sh` |
+| `privilege_escalation` | `sudo`, `su -`, `nsenter`, `unshare`, `mount`, `capsh`/`setcap` |
+| `dangerous_paths` | `chmod` on `/`, `chown` on `/`, `chmod +x` on `/tmp` `/var/tmp` `/dev/shm` |
+| `env_injection` | `LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`, `LD_LIBRARY_PATH`, `GIT_EXTERNAL_DIFF`, `BASH_ENV` |
+| `container_escape` | `docker.sock`, `/proc/sys/`, `/sys/` |
+| `crypto_mining` | `xmrig`, `cpuminer`, `stratum+tcp://` |
+| `filter_bypass` | `sed /e`, `sort --compress-program`, `git --upload-pack`, `rg --pre=`, `man --html=` |
+| `network_recon` | `nmap`/`masscan`/`zmap`, `ssh/scp@`, `chisel`/`ngrok`/`cloudflared` tunneling |
+| `package_install` | `pip install`, `npm install`, `apk add`, `yarn add`, `pnpm add` |
+| `persistence` | `crontab`, writes to `.bashrc`/`.profile`/`.zshrc` |
+| `process_control` | `kill -9`, `killall`, `pkill` |
+| `env_dump` | `env`, `printenv`, `/proc/*/environ`, `echo $GOCLAW_*` secrets |
+
+### Execution Timeout
+
+The host `exec` tool aborts a command that runs too long. The timeout is a per-tool builtin setting named `timeout_seconds`, stored under the `exec` tool's settings:
+
+```json
+{
+  "timeout_seconds": 120
+}
+```
+
+| Property | Value |
+|----------|-------|
+| Default / fallback | 60 seconds |
+| Minimum | 1 second |
+| Maximum | 3600 seconds (1 hour) — values above are clamped down |
+| Invalid / missing value | Falls back to 60 seconds |
+
+Set it from the dashboard (**Config → Tools → Built-in Tools → exec**) or via the builtin-tool settings API. A tenant-level setting overrides the global one. When the command exceeds the timeout, the process group is killed (SIGTERM, then SIGKILL after a 3-second grace period) and the tool returns `command timed out after <duration>`.
+
+> This setting governs only the host `exec` tool. It is **distinct** from the per-custom-tool `timeout_seconds` and the sandbox `sandbox_config.timeout_sec` — see [Custom Tools](/custom-tools).
+
+### Command Keyword Allowlist
+
+When an agent runs a credentialed CLI (via `credentialed_exec` / the secure-CLI gate), the per-binary `deny_args` patterns scan argument values for dangerous vocabulary. This can produce false positives: legitimate product or security content passed as an argument (for example, a post body or message that mentions a flagged word) gets blocked even though it is plain data, not a command.
+
+The command keyword allowlist solves this without weakening `deny_args`. Configure scoped rules via `tools.commandKeywordAllowlist`:
+
+```json
+{
+  "tools": {
+    "commandKeywordAllowlist": [
+      {
+        "id": "social-post-content",
+        "command": "zernio",
+        "subcommands": ["posts:create"],
+        "args": ["--text"],
+        "keywords": ["install", "exec"],
+        "reason": "marketing copy may mention these words as content",
+        "enabled": true
+      }
+    ]
+  }
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | string | Identifier for the rule (used in audit logs) |
+| `command` | string | Binary the rule applies to (case- and path-normalized) |
+| `subcommands` | string[] | Optional subcommands that must match (e.g. `"posts:create"`) |
+| `args` | string[] | Argument flags whose values are scanned (e.g. `"--text"`) |
+| `argPositions` | int[] | Optional 0-based positional args (after the matched subcommand) |
+| `keywords` | string[] | Vocabulary that is allowed inside the matched argument values |
+| `reason` | string | Free-form note recorded in the audit log |
+| `enabled` | bool | Defaults to enabled when omitted |
+
+How it works: before the `deny_args` check runs, the allowlisted keyword is masked (replaced with a placeholder) **only inside the matched argument value**. The deny scan no longer trips on that word, but command-path deny patterns and shell-operator blocking stay fully active — the allowlist never disables `deny_args`, it only exempts specific flagged vocabulary inside specific content arguments. Each match is recorded in a `security.command_keyword_allowlist` audit log with the binary, subcommand, argument, keyword, rule ID, and agent/tenant context.
+
+This config is **reloaded at runtime** via the `TopicConfigChanged` bus — no gateway restart required.
+
+### Global shellDenyGroups (Runtime-Reloadable)
+
+In addition to per-agent overrides, admins can enable or disable deny groups **globally** via `config.tools.shellDenyGroups` (`map[string]bool`):
+
+```json
+{
+  "tools": {
+    "shellDenyGroups": {
+      "package_install": true,
+      "env_dump": true
+    }
+  }
+}
+```
+
+This config is **reloaded at runtime** via the `TopicConfigChanged` bus — no gateway restart required. Per-agent overrides (`shell_deny_groups` in agent config) take precedence per-key over the global setting.
+
+See also: [deployment/security-hardening](/deployment/security-hardening).
+
+### Per-Agent Override
+
+Admins can disable specific groups per agent:
+
+```jsonc
+{
+  "agents": {
+    "list": {
+      "dev-bot": {
+        "shell_deny_groups": {
+          "package_install": false,
+          "process_control": false
+        }
+      }
+    }
+  }
+}
+```
+
+### Hardened Exemption Matching
+
+When a shell command matches a deny pattern, GoClaw checks path exemptions (e.g., `.goclaw/skills-store/`). The exemption logic is strict:
+
+- **All-or-nothing** — Every field in the command that triggers the deny pattern must be individually covered by an exemption. A single unexempted field blocks the entire command
+- **Path traversal blocked** — Fields containing `..` are never exempt, preventing exemption escape via `../../etc/passwd`
+- **Quote stripping** — Surrounding quotes (`"`, `'`) are stripped before matching, since LLMs often quote paths
+
+This prevents pipe/comment bypass attacks like `cat /app/data/skills-store/tool.py | cat /app/data/secret` — the second field matches deny but has no exemption, so the entire command is blocked.
+
+The `tools.exec_approval` setting adds an additional approval layer (`full`, `light`, or `none`).
+
+## spawn — Subagent Orchestration
+
+The `spawn` tool (part of `group:sessions`) creates and runs subagents. Key capabilities:
+
+| Capability | Detail |
+|-----------|--------|
+| **WaitAll** | `spawn(action=wait, timeout=N)` blocks the parent until all previously spawned children complete. Useful for fan-out/fan-in patterns. Distinct from the built-in `wait` tool above, which pauses for a fixed duration regardless of subagent state. |
+| **Auto-retry** | Configurable `MaxRetries` (default `2`) with linear backoff on LLM failures. Transient errors are retried automatically. |
+| **Token tracking** | Each subagent accumulates per-call input/output token counts. Totals are included in announce messages so the parent can account for cost. |
+| **SubagentDenyAlways** | Subagents cannot spawn nested subagents — the `team_tasks` tool is blocked in subagent context. Prevents unbounded delegation chains. |
+| **Producer-consumer announce queue** | Staggered subagent results are queued and merged into a single LLM run announcement on the parent side, reducing unnecessary wake-ups. |
+
+```jsonc
+// Example: fan-out then wait
+spawn(action=start, prompt="Summarize part A")
+spawn(action=start, prompt="Summarize part B")
+spawn(action=wait, timeout=120)  // blocks until both finish
+```
+
+## Session Tool Security
+
+Session tools (`sessions_list`, `sessions_history`, `sessions_send`) are hardened with fail-closed validation:
+
+- **Phantom session prevention**: session lookups use read-only Get, never GetOrCreate, preventing accidental session creation
+- **Ownership validation**: session keys must match the calling agent's prefix (`agent:{agentID}:*`)
+- **Fail-closed design**: missing agentID or invalid ownership immediately returns an error — never falls through
+- **Self-send blocking**: the `message` tool blocks agents from sending to their own current channel/chat, preventing duplicate media delivery
+
+## Adaptive Tool Timing
+
+GoClaw tracks execution time per tool in each session. If a tool call takes longer than 2× its historical maximum (with at least 3 prior samples), a slow-tool notification is emitted. The default threshold for tools without history is 120 seconds.
+
+## Custom Tools & MCP
+
+Beyond built-in tools, you can extend agents with:
+
+- **Custom Tools** — Define tools via the dashboard or API with input schemas and handlers
+- **MCP Servers** — Connect Model Context Protocol servers for dynamic tool registration
+
+See [Custom Tools](/custom-tools) and [MCP Integration](/mcp-integration) for details.
+
+## Common Issues
+
+| Problem | Solution |
+|---------|----------|
+| Agent can't use a tool | Check tools_profile and deny lists; verify tool exists for the profile |
+| Shell command blocked | Review deny patterns; adjust `exec_approval` level |
+| Tool results too large | GoClaw auto-trims results >4,000 chars; consider more specific queries |
+
+### Browser Automation
+
+The `browser` tool lets agents control a headless browser (Chrome/Chromium). It must be enabled in config (`tools.browser.enabled: true`).
+
+**Safety mechanisms:**
+
+| Parameter | Default | Config Key | Description |
+|-----------|---------|------------|-------------|
+| Action timeout | 30 s | `tools.browser.action_timeout_ms` | Max time per browser action |
+| Idle timeout | 10 min | `tools.browser.idle_timeout_ms` | Auto-close pages after idle (0 = disabled, negative = disabled) |
+| Max pages | 5 | `tools.browser.max_pages` | Max open pages per tenant |
+
+All parameters are optional — defaults apply when not configured.
+
+## What's Next
+
+- [Memory System](../core-concepts/memory-system.md) — How long-term memory and search work
+- [Multi-Tenancy](/multi-tenancy) — Per-user tool access and isolation
+- [Custom Tools](/custom-tools) — Build your own tools
+
+<!-- goclaw-source: fabe86b3 | updated: 2026-06-30 -->

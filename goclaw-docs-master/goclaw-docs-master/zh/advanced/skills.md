@@ -1,0 +1,619 @@
+> 翻译自 [English version](/skills)
+
+# Skills
+
+> 将可复用知识打包成 Markdown 文件，自动注入到任意 agent 的上下文中。
+
+## 概述
+
+Skill 是一个包含 `SKILL.md` 文件的目录。当 agent 运行时，GoClaw 读取该作用域内的 skill 文件，并将其内容以 `## Available Skills` 章节注入到系统提示词中。agent 随即可以使用这些知识，无需在每次对话中重复。
+
+Skill 适合用于编码重复流程、工具使用指南、领域知识或 agent 应始终遵循的编码规范。
+
+## SKILL.md 格式
+
+每个 skill 存放在独立目录中，目录名即为 skill 的 **slug** — 用于过滤和搜索的唯一标识符。
+
+```
+~/.goclaw/skills/
+└── code-reviewer/
+    └── SKILL.md
+```
+
+`SKILL.md` 文件包含可选的 YAML frontmatter 块，后跟 skill 内容：
+
+```markdown
+---
+name: Code Reviewer
+description: Guidelines for reviewing pull requests — style, security, and performance checks.
+---
+
+## How to Review Code
+
+When asked to review code, always check:
+1. **Security** — SQL injection, XSS, hardcoded secrets
+2. **Error handling** — all errors returned or logged
+3. **Tests** — new logic has corresponding test coverage
+
+Use `{baseDir}` to reference files alongside this SKILL.md:
+- Checklist: {baseDir}/review-checklist.md
+```
+
+`{baseDir}` 占位符在加载时替换为 skill 目录的绝对路径，方便引用同级文件。
+
+> **多行块**：YAML frontmatter 支持使用 `|` 块标量为 `description` 编写多行字符串，适合较长的描述。
+
+**Frontmatter 字段：**
+
+| 字段 | 描述 |
+|---|---|
+| `name` | 人类可读的显示名称（默认为目录名） |
+| `description` | 供 `skill_search` 匹配查询的单行摘要 |
+
+## 六层优先级
+
+GoClaw 按优先级从六个位置加载 skill。高优先级位置的 skill 会覆盖低优先级的同名 slug：
+
+| 优先级 | 位置 | 来源标签 |
+|---|---|---|
+| 1（最高） | `<workspace>/skills/` | `workspace` |
+| 2 | `<workspace>/.agents/skills/` | `agents-project` |
+| 3 | `~/.agents/skills/` | `agents-personal` |
+| 4 | `~/.goclaw/skills/` | `global` |
+| 5 | `~/.goclaw/skills-store/`（DB 托管，版本化） | `managed` |
+| 6（最低） | 内置（随二进制文件打包） | `builtin` |
+
+通过 Dashboard 上传的 skill 存储在 `~/.goclaw/skills-store/`，使用版本化子目录结构（`<slug>/<version>/SKILL.md`）。它们作用于 `managed` 层级——高于 builtin，但低于四个文件系统层级。Loader 始终为每个 slug 提供编号最高的版本。
+
+**优先级示例：** 如果 `~/.goclaw/skills/` 和 `<workspace>/skills/` 中都有 `code-reviewer` skill，则 workspace 版本优先。
+
+## 热重载
+
+GoClaw 使用 `fsnotify` 监听所有 skill 目录。当你创建、修改或删除 `SKILL.md` 时，500 毫秒内生效 — 无需重启。watcher 会递增内部版本计数器；agent 在每次请求时比较缓存的版本，如版本变更则重新加载 skill。
+
+```
+# 放入新 skill — agent 在下次请求时自动拾取
+mkdir ~/.goclaw/skills/my-new-skill
+echo "---\nname: My Skill\ndescription: Does something useful.\n---\n\n## Instructions\n..." \
+  > ~/.goclaw/skills/my-new-skill/SKILL.md
+```
+
+## 斜杠命令激活
+
+与其等待 agent 通过 `skill_search` 发现某个 skill，你可以在聊天消息开头使用斜杠命令显式激活它。该功能默认启用。
+
+```
+/code-reviewer review this PR
+/use sql-style format these queries
+/list-skills
+/help code-reviewer
+```
+
+**支持的形式：**
+
+| 命令 | 作用 |
+|---|---|
+| `/<skill-slug> <你的请求>` | 按 slug（或显示名称）激活 skill，并将消息的其余部分作为该 skill 的输入 |
+| `/use <skill> <请求>` | 同上，显式动词形式（`/activate` 同样可用） |
+| `/list-skills` | 让 agent 列出所有可用 skill |
+| `/help <skill>` | 让 agent 解释某个 skill 及其用法 |
+
+当某个 skill 被激活时，GoClaw 会将其 `SKILL.md` 加载到当前轮次，并将 agent 限定在该 skill 的范围内处理本次请求。
+
+**匹配规则：**
+
+- **精确匹配**优先 — 直接匹配 slug 或显示名称（不区分大小写）。`/code-reviewer` 匹配 `code-reviewer` skill。
+- **部分（前缀）匹配**为可选项（默认关闭）。启用后，若 `code-reviewer` 是唯一的前缀匹配，则 `/code` 可匹配它。
+- **歧义保护** — 若两个 skill 的匹配强度相同（匹配长度相同），该命令将被视为*未匹配*，而非随意猜测。
+
+**未匹配：** 若找不到请求的 skill，GoClaw 会运行模糊相似度搜索（编辑距离，最多 3 条建议），并让 agent 告知你该 skill 未找到，同时推荐最接近的可用 skill。该建议行为默认启用。若不存在相似的 skill，消息将按普通提示词处理。
+
+**配置**（均为可选）：
+
+| 配置键 | Env / system config | 默认值 | 作用 |
+|---|---|---|---|
+| `skills.slash_commands.enabled` | `skills.slash_commands.enabled` | `true` | 总开关 |
+| `skills.slash_commands.prefix` | `skills.slash_commands.prefix` | `/` | 单字符触发前缀 |
+| `skills.slash_commands.partial_matching` | `skills.slash_commands.partial_matching` | `false` | 允许前缀匹配 |
+| `skills.slash_commands.suggest_not_found` | `skills.slash_commands.suggest_not_found` | `true` | 未匹配时建议替代项 |
+
+> 看起来像文件路径的消息（首个 token 中包含 `/`、`\` 或 `.`，例如 `/etc/hosts`）**不会**被视为斜杠命令，将原样传递。
+
+## 通过 Dashboard 上传
+
+进入 **Skills → Upload**，拖入 ZIP 文件。ZIP 可以包含**单个 skill** 或**多个 skill**：
+
+```
+# 单个 skill — SKILL.md 在根目录
+my-skill.zip
+└── SKILL.md
+
+# 单个 skill — 包裹在单个目录中
+my-skill.zip
+└── code-reviewer/
+    ├── SKILL.md
+    └── review-checklist.md
+
+# 多 skill ZIP — 一次上传多个 skill
+skills-bundle.zip
+└── skills/
+    ├── code-reviewer/
+    │   ├── SKILL.md
+    │   └── metadata.json
+    └── sql-style/
+        ├── SKILL.md
+        └── metadata.json
+```
+
+上传的 skill 以版本化子目录结构存储在管理目录下（默认 `~/.goclaw/skills-store/`）：
+
+```
+~/.goclaw/skills-store/<slug>/<version>/SKILL.md
+```
+
+元数据（名称、描述、可见性、授权）存在 PostgreSQL 中；文件内容存在磁盘上。GoClaw 始终提供编号最高的版本。旧版本保留以备回滚。
+
+通过 Dashboard 上传的 skill 初始可见性为 **internal** — 可立即被你授权的任意 agent 或用户访问。
+
+### 上传大小限制
+
+Skill ZIP 上传（Dashboard 和 `POST /v1/skills/import`）受可配置的大小限制约束。默认值为 **20 MB**，且生效值始终被钳制在 **1–500 MB** 范围内。
+
+该限制按以下优先级顺序解析（最高优先）：
+
+1. **租户覆盖** — system config 键 `skills.max_upload_size_mb`（按租户设置）
+2. **SKILL.md frontmatter** — skill frontmatter 中的 `max_upload_size_mb` 字段
+3. **网关默认值** — 环境变量 `GOCLAW_SKILLS_MAX_UPLOAD_SIZE_MB` 或配置文件中的 `skills.max_upload_size_mb`（回退到 20 MB）
+
+```yaml
+# 通过 SKILL.md frontmatter 为单个 skill 提高限制
+---
+name: large-skill
+description: Ships large reference assets.
+max_upload_size_mb: 100
+---
+```
+
+```bash
+# 通过环境变量设置网关全局默认值
+export GOCLAW_SKILLS_MAX_UPLOAD_SIZE_MB=128
+```
+
+超过已解析限制的上传将被拒绝，错误类似 `skill ZIP size 42.0 MB exceeds 20 MB limit`。
+
+## 通过 API 导入
+
+`POST /v1/skills/import` 端点接受与 Dashboard 上传相同的 ZIP 格式，支持单 skill 和多 skill 归档包。
+
+**标准导入（JSON 响应）：**
+
+```bash
+curl -X POST http://localhost:8080/v1/skills/import \
+  -H "Authorization: Bearer $TOKEN" \
+  -F "file=@skills-bundle.zip"
+```
+
+返回 `SkillsImportSummary` JSON 对象：
+
+```json
+{
+  "skills_imported": 2,
+  "skills_skipped": 0,
+  "grants_applied": 3
+}
+```
+
+**SSE 流式进度导入（`?stream=true`）：**
+
+```bash
+curl -X POST "http://localhost:8080/v1/skills/import?stream=true" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Accept: text/event-stream" \
+  -F "file=@skills-bundle.zip"
+```
+
+使用 `?stream=true` 时，服务器在处理每个 skill 时发送 Server-Sent Events（SSE）：
+
+```
+event: progress
+data: {"phase":"skill","status":"running","detail":"code-reviewer"}
+
+event: progress
+data: {"phase":"skill","status":"done","detail":"code-reviewer"}
+
+event: complete
+data: {"skills_imported":2,"skills_skipped":0,"grants_applied":3}
+```
+
+**基于哈希的幂等性：** 上传端点使用 `SKILL.md` 内容的 SHA-256 哈希进行去重。如果相同的 `SKILL.md` 内容再次上传（即使打包在不同的 ZIP 中），也不会创建新版本 — 现有版本保持不变。只有 `SKILL.md` 实际内容发生变化时才会触发新版本创建。
+
+> **通过 `skill_manage` 内联伴生文件：** 启用了 skill 进化的 agent 也可以通过向 `skill_manage` tool 传入 `files` 对象来内联创建小型文本伴生文件（无需 ZIP）—— 以相对路径作为键，例如 `references/guide.md`。每个内联文本文件限制为 **2 MB**，路径校验器会拒绝绝对路径、Windows 盘符路径（`C:\...`）、空字节、`..` 穿越、覆盖 `SKILL.md`、dotfile/dotdir 以及系统工件（例如 `.git`）。详见 [Agent 进化](agent-evolution.md)。
+
+## 选择性导出与下载
+
+你可以从 Dashboard 或 API 将 skill 导出为 ZIP 归档 —— 既可导出全部 skill，也可导出手动挑选的子集。
+
+**构建前预览** —— `GET /v1/skills/export/preview` 返回*将要*导出的数量而不构建归档，以便 UI 在你确认前显示"N 个 skill，将包含 M 个"：
+
+```bash
+curl "http://localhost:8080/v1/skills/export/preview" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+**导出选定的 skill** —— 传入特定的 skill ID 仅导出那些 skill，并可附带可选的 `include_system` 标志以包含内置/系统 skill：
+
+```bash
+# 导出两个特定 skill，排除系统 skill
+curl "http://localhost:8080/v1/skills/export?ids=SKILL_ID_1,SKILL_ID_2&include_system=false" \
+  -H "Authorization: Bearer $TOKEN" -o skills-export.zip
+```
+
+对于大型导出，服务器可异步构建归档，并在处理过程中流式推送 Server-Sent Events。完成时返回指向一次性 token 端点的 `download_url`：
+
+```
+event: complete
+data: {"download_url":"/v1/export/download/TOKEN"}
+```
+
+```bash
+# 使用返回的 token 获取已构建的归档
+curl "http://localhost:8080/v1/export/download/TOKEN" \
+  -H "Authorization: Bearer $TOKEN" -o skills-export.zip
+```
+
+**Dashboard：** **Skills** 页面有一个批量选择工具栏 —— 勾选你想要的 skill，然后点击 **Export selected** 仅下载那些 skill。
+
+## 访问模式与有效访问
+
+除可见性级别外，每个 skill 还有一个**访问模式（access mode）**，用于控制其可达范围。管理员通过 access 端点读取和设置它：
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `GET` | `/v1/skills/{id}/access` | 显示该 skill 的访问模式和 grants |
+| `PATCH` | `/v1/skills/{id}/access` | 设置访问模式（`private`、`internal` 或 `public`） |
+| `GET` | `/v1/skills/{id}/access/effective` | 针对给定 agent 和 user，解释单个 skill 的有效访问 |
+| `GET` | `/v1/skills/access/effective` | 针对一个 agent 和 user，解释所有 skill 的有效访问 |
+
+```bash
+# 将某个 skill 的访问模式设为 internal
+curl -X PATCH "http://localhost:8080/v1/skills/{id}/access" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"access_mode": "internal"}'
+
+# 解释某个 agent/user 为何能或不能访问某个 skill
+curl "http://localhost:8080/v1/skills/{id}/access/effective?agent_id=AGENT_UUID&user_id=user@example.com" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+### 按 skill 的依赖端点
+
+除了全网关重新扫描外，你还可以检查和管理单个 skill 的依赖：
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `GET` | `/v1/skills/{id}/dependencies` | skill 当前的依赖状态 |
+| `POST` | `/v1/skills/{id}/dependencies/scan` | 重新扫描已声明和检测到的依赖 |
+| `POST` | `/v1/skills/{id}/dependencies/check` | 检查每个依赖在运行时能否解析 |
+| `POST` | `/v1/skills/{id}/dependencies/install` | 安装缺失的依赖（master 租户） |
+
+## 运行时环境
+
+使用 Python 或 Node.js 的 skill 在预装了相应包的 Docker 容器中运行。
+
+### 预装包
+
+| 类别 | 包 |
+|---|---|
+| Python | `pypdf`、`openpyxl`、`pandas`、`python-pptx`、`markitdown` |
+| Node.js（全局 npm） | `docx`、`pptxgenjs` |
+| 系统工具 | `python3`、`nodejs`、`pandoc`、`gh`（GitHub CLI） |
+
+### 可写运行时目录
+
+容器根文件系统为只读。agent 将额外包安装到可写的卷挂载目录：
+
+```
+/app/data/.runtime/
+├── pip/         ← PIP_TARGET（Python 包）
+├── pip-cache/   ← PIP_CACHE_DIR
+└── npm-global/  ← NPM_CONFIG_PREFIX（Node.js 包）
+```
+
+运行时安装的包在同一容器生命周期内的工具调用间持久存在。
+
+### 安全约束
+
+| 约束 | 详情 |
+|---|---|
+| `read_only: true` | 容器根文件系统不可变；只有卷可写 |
+| `/tmp` 为 `noexec` | 不能从 tmpfs 执行二进制文件 |
+| `cap_drop: ALL` | 无提权 |
+| Exec 拒绝模式 | 阻止 `curl \| sh`、反弹 shell、加密挖矿 |
+| `.goclaw/` 被拒绝 | Exec 工具阻止访问 `.goclaw/`，但允许 `.goclaw/skills-store/` |
+
+### Agent 可以 / 不可以做什么
+
+Agent **可以**：运行 Python/Node 脚本，通过 `pip3 install` 或 `npm install -g` 安装包，访问 `/app/workspace/` 中的文件 — 包括用于当前用户上传的 `.uploads/` 以及用于旧版媒体引用的 `.media/`。
+
+Agent **不可以**：写入系统路径，从 `/tmp` 执行二进制文件，运行被拦截的 shell 模式（网络工具、反弹 shell）。
+
+## 内置 Skill
+
+GoClaw 在 Docker 镜像内的 `/app/bundled-skills/` 中内置了七个核心 skill，优先级最低 — 用户上传的同名 slug skill 可覆盖它们。
+
+| Skill | 用途 |
+|---|---|
+| `pdf` | 读取、创建、合并、拆分 PDF |
+| `xlsx` | 读取、创建、编辑电子表格 |
+| `docx` | 读取、创建、编辑 Word 文档 |
+| `pptx` | 读取、创建、编辑演示文稿 |
+| `skill-creator` | 创建新 skill |
+| `workspace-organizing` | 保持 agent 工作空间整洁、易于查找 — 强制执行基于用途的文件夹约定，并在写入文件前运行 memory/Vault/knowledge-graph 发现以避免重复 |
+| `goclaw` | 通过 `goclaw` CLI/runtime 运维、检查、管理和调试 GoClaw 网关 — CLI 发现、网关 health/config 诊断、agents、skills、MCP/tools、运行时包、credentials、traces、sessions、channels、providers 和 cron/jobs。始终先检查实时的 `goclaw --help` 输出，因为可用命令取决于版本。 |
+
+内置 skill 在每次网关启动时种入 PostgreSQL（哈希跟踪，未变更则不重新导入）。它们被标记为 `is_system = true` 且 `visibility = 'public'`。
+
+### 依赖系统
+
+GoClaw 自动检测并安装缺失的 skill 依赖：
+
+1. **扫描器** — 静态分析 `scripts/` 子目录中的 Python（`import X`、`from X import`）和 Node.js（`require('X')`、`import from 'X'`）导入
+2. **检查器** — 通过子进程验证每个导入在运行时是否可解析（`python3 -c "import X"` / `node -e "require.resolve('X')"`）
+3. **安装器** — 按前缀安装：
+
+| 前缀 | 效果 |
+|------|------|
+| `pip:name` | `pip3 install`（Python 包） |
+| `npm:name` | `npm install -g`（Node.js 包） |
+| `system:name` | 通过 pkg-helper 执行 `apk add`（系统包） |
+| `github:owner/repo[@tag]` | GitHub Releases 安装器——仅管理员可用，SHA256 验证，ELF 验证。二进制文件安装至 `/app/data/.runtime/bin/`（已加入 `$PATH`）。 |
+
+使用 `github:` 的 SKILL.md frontmatter 示例：
+
+```yaml
+---
+name: my-skill
+description: Does things using ripgrep and gh CLI.
+deps:
+  - github:BurntSushi/ripgrep@14.1.0
+  - github:cli/cli@v2.40.0
+  - pip:requests
+---
+```
+
+`github:` 安装器从 GitHub Releases 获取发布，自动选择匹配 `linux` + 当前架构（amd64 / arm64）的资源，若发布者提供 `checksums.txt` 则验证 SHA256，校验 ELF magic bytes，并解压至 `/app/data/.runtime/bin/`。不指定 `@tag` 时使用最新发布。
+
+依赖检查在启动时的后台 goroutine 中运行（非阻塞）。缺少依赖的 skill 会被自动归档；安装依赖后重新激活。也可通过 Dashboard 的 **Skills → Rescan Deps** 或 `POST /v1/skills/rescan-deps` 触发重新扫描。
+
+## 内置 Skill 工具
+
+GoClaw 提供三个内置工具，供 agent 在运行时发现和激活 skill。
+
+### skill_search
+
+Agent 使用 `skill_search` 搜索 skill。搜索使用基于每个 skill 名称和描述构建的 **BM25 索引**，当配置了 embedding provider 时可选混合搜索（BM25 + 向量嵌入）。
+
+```
+# agent 在内部调用此工具 — 你不需要直接调用它
+skill_search(query="how to review a pull request", max_results=5)
+```
+
+该工具返回包含名称、描述、位置路径和得分的排名结果。收到结果后，agent 调用 `use_skill` 再调用 `read_file` 来加载 skill 内容。
+
+每次 loader 版本计数器递增时（即任何热重载事件或启动后）索引都会重建。
+
+### use_skill
+
+轻量级可观测性标记工具。agent 在读取 skill 文件前调用 `use_skill`，使 skill 激活在追踪和实时事件中可见。它本身不加载任何内容。
+
+```
+use_skill(name="code-reviewer")
+# 然后：
+read_file(path="/path/to/code-reviewer/SKILL.md")
+```
+
+### publish_skill
+
+Agent 可以使用 `publish_skill` 将本地 skill 目录注册到系统数据库中。目录必须包含 frontmatter 中有 `name` 的 `SKILL.md`。skill 发布后自动授权给调用的 agent。
+
+```
+publish_skill(path="./skills/my-skill")
+```
+
+skill 以 `private` 可见性存储，并自动授权给调用的 agent。管理员可以在之后通过 Dashboard 或 API 将其授权给其他 agent 或提升可见性。
+
+## 向 Agent 授权 Skill（管理模式）
+
+通过 `publish_skill` 发布的 skill 初始可见性为 **private**，通过 Dashboard 上传的为 **internal**。无论哪种方式，都必须将 skill **授权**给 agent，才能将其注入该 agent 的上下文。
+
+### 通过 Dashboard
+
+1. 在侧边栏点击 **Skills**
+2. 点击要授权的 skill
+3. 在 **Agent Grants** 下选择 agent 并点击 **Grant**
+4. skill 将在下次请求时注入该 agent 的上下文
+
+要撤销，在授权列表中关闭该 agent 的切换。
+
+### 通过 API
+
+授权 skill 给 agent：
+
+```bash
+curl -X POST http://localhost:8080/v1/skills/{id}/grants/agent \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"agent_id": "AGENT_UUID", "version": 1}'
+```
+
+如需同时授予管理权限（参见下方 [Agent-Manage Grants](#agent-manage-grants)），添加 `"can_manage": true`：
+
+```bash
+curl -X POST http://localhost:8080/v1/skills/{id}/grants/agent \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"agent_id": "AGENT_UUID", "version": 1, "can_manage": true}'
+```
+
+列出某个 skill 的所有 agent grant：
+
+```bash
+curl http://localhost:8080/v1/skills/{id}/grants/agent \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+响应：
+
+```json
+{
+  "grants": [
+    {
+      "agent_id": "019...",
+      "agent_key": "my-agent",
+      "display_name": "My Agent",
+      "pinned_version": 1,
+      "granted_by": "admin@example.com",
+      "can_manage": false
+    }
+  ]
+}
+```
+
+撤销 agent 授权：
+
+```bash
+curl -X DELETE http://localhost:8080/v1/skills/{id}/grants/agent/{agent_id} \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+授权 skill 给特定用户（使其出现在该用户的 agent 会话中）：
+
+```bash
+curl -X POST http://localhost:8080/v1/skills/{id}/grants/user \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"user_id": "user@example.com"}'
+```
+
+撤销用户授权：
+
+```bash
+curl -X DELETE http://localhost:8080/v1/skills/{id}/grants/user/{user_id} \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+### Agent-Manage Grants
+
+默认情况下，只有 skill 所有者和租户管理员可以编辑或删除 skill。`skill_agent_grants` 上的 `can_manage` 标志允许将该权限委托给特定 agent，而无需将其提升为管理员。
+
+当 `can_manage = true` 时，被授权的 agent 可以：
+- 通过 `PUT /v1/skills/{id}` 更新 skill 的名称、描述、标签和可见性
+- 通过 `DELETE /v1/skills/{id}` 删除 skill
+- 在对话中使用 `skill_manage` 工具发布新版本
+
+**租户范围强制执行** — skill 和 agent 必须属于同一租户。跨租户边界的 grant 写入在 store 层（`verifySkillGrantScope`）被拒绝。迁移 `000067` 删除旧版本中存在的跨租户行。
+
+**可见性自动提升** — 将 `private` skill 授权给任意 agent 会自动将其提升为 `internal`，使被授权方可以访问。撤销最后一个 agent grant 时，原子性地将其降级回 `private`。
+
+### 租户范围 Grant 隔离
+
+在多租户部署中，skill grant 操作受租户范围限制：
+
+- `POST /v1/skills/{id}/grants/agent` 验证目标 agent 与 skill 属于同一租户。跨租户 grant 尝试返回 `404`（"agent not found"），避免泄露租户拓扑。
+- 系统 skill（`is_system = true`）绕过租户过滤——所有租户均可访问。
+- `GET /v1/skills/{id}/grants/agent` 仅返回请求租户范围内的 grant。
+
+### 可见性级别
+
+| 级别 | 可访问者 |
+|---|---|
+| `private` | 仅 skill 所有者（上传者） |
+| `internal` | 明确被授权的 agent 和用户 |
+| `public` | 所有 agent 和用户 |
+
+## 示例
+
+### 工作空间范围的 SQL 风格指南
+
+```
+my-project/
+└── skills/
+    └── sql-style/
+        └── SKILL.md
+```
+
+```markdown
+---
+name: SQL Style Guide
+description: Team conventions for writing PostgreSQL queries in this project.
+---
+
+## SQL Conventions
+
+- Use `$1, $2` positional parameters — never string interpolation
+- Always use `RETURNING id` on INSERT
+- Table and column names: snake_case
+- Never use `SELECT *` in application queries
+```
+
+### 全局"保持简洁"提醒
+
+```
+~/.goclaw/skills/
+└── concise-responses/
+    └── SKILL.md
+```
+
+```markdown
+---
+name: Concise Responses
+description: Keep all responses short, bullet-pointed, and actionable.
+---
+
+Always:
+- Lead with the answer, not the explanation
+- Use bullet points for lists of 3 or more items
+- Keep code examples under 20 lines
+```
+
+## Agent 注入阈值
+
+GoClaw 决定是将 skill 内联嵌入系统提示词，还是回退到 `skill_search`：
+
+| 条件 | 模式 |
+|---|---|
+| `≤ 40 个 skill` 且估算 token `≤ 5000` | **内联** — skill 以 XML 形式注入系统提示词 |
+| `> 40 个 skill` 或估算 token `> 5000` | **搜索** — agent 使用 `skill_search` 工具 |
+
+Token 估算：每个 skill 约 `(len(name) + len(description) + 10) / 4`（约 100–150 token）。
+
+已禁用的 skill（`enabled = false`）不参与内联和搜索注入。
+
+### 列出已归档的 Skill
+
+缺少依赖的 skill 状态设为 `status = 'archived'`，仍可在 Dashboard 中查看。可通过 `GET /v1/skills?status=archived` 或 `skills.list` WebSocket RPC 方法列出（返回每个 skill 的 `enabled`、`status` 和 `missing_deps` 字段）。
+
+## Skill 进化
+
+当 agent 配置中启用了 `skill_evolve` 时，agent 获得 `skill_manage` 工具，可以在对话中创建、更新和版本化 skill — 形成一个让 agent 改善自身知识库的学习循环。当 `skill_evolve` 为 **off**（默认值）时，`skill_manage` 工具完全从 LLM 的工具列表中隐藏。
+
+详见 [Agent 进化](agent-evolution.md) 中关于 `skill_manage` 工具和进化工作流的完整说明。
+
+## 常见问题
+
+| 问题 | 原因 | 解决方法 |
+|---|---|---|
+| Skill 未出现在 agent 中 | 目录结构错误（SKILL.md 不在子目录中） | 确保路径为 `<skills-dir>/<slug>/SKILL.md` |
+| 修改未被拾取 | watcher 未启动（非 Docker 环境） | 重启 GoClaw；验证日志中的 `skills watcher started` |
+| 使用了低优先级 skill | 名称冲突 — slug 在更高层级已存在 | 使用唯一 slug，或将 skill 放在更高优先级位置 |
+| `skill_search` 无结果 | 索引尚未构建（第一次请求）或 frontmatter 无描述 | 在 frontmatter 中添加 `description`；下次热重载时索引重建 |
+| ZIP 上传失败 | ZIP 中未找到 `SKILL.md` | 将 `SKILL.md` 放在 ZIP 根目录、一个顶层目录中，或使用多 skill 布局 `skills/<slug>/SKILL.md` |
+
+## 下一步
+
+- [MCP 集成](/mcp-integration) — 连接外部工具服务器
+- [自定义工具](/custom-tools) — 为 agent 添加基于 shell 的工具
+- [定时任务与 Cron](/scheduling-cron) — 按计划运行 agent
+
+<!-- goclaw-source: fabe86b3 | 更新: 2026-06-30 -->

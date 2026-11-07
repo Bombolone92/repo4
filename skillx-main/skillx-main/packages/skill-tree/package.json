@@ -1,0 +1,27 @@
+{
+  "name": "@skillx/skill-tree",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "agentkit.skill-tree/v1 canonical tree digest, archive readers, identity and exposure rules shared with AgentKit.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./rules": "./src/rules.ts"
+  },
+  "types": "./src/index.ts",
+  "engines": {
+    "node": ">=21.2"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "gen:unicode": "node scripts/gen-unicode-tables.mjs"
+  },
+  "dependencies": {
+    "yaml": "^2.9.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.10",
+    "typescript": "^5.9.2"
+  }
+}

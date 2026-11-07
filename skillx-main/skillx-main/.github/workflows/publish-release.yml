@@ -1,0 +1,160 @@
+# Publishes one immutable SkillX release from a committed git tree.
+#
+# The tree is packed by the same `skillx release pack` code that runs locally,
+# so the releaseDigest computed here matches a maintainer's machine. The
+# registry countersigns the manifest; this workflow never holds a signing key.
+#
+# Triggers: manual dispatch and workflow_call only. It never runs on pull
+# requests (including forks), and the job-level guard below keeps it that way
+# if a caller wires it into a PR-triggered workflow.
+#
+# The job runs in the `skillx-publish` environment: store SKILLX_PUBLISH_KEY
+# (an API key scoped to releases:publish:@<publisher>) as a secret of that
+# environment and optionally require reviewers. An environment secret takes
+# precedence over one passed by a caller. The key only goes to the production
+# registry (https://skillx.sh); only workflow_call may name another https host.
+# Needs a published skillx-sh version that has the `release` command. Its `--json`
+# output is read both as the 0.x raw object and as the `{ok, data}` envelope.
+#
+# Caller example:
+#   jobs:
+#     publish:
+#       uses: nextlevelbuilder/skillx/.github/workflows/publish-release.yml@<sha>
+#       with: { name: "@acme/my-skill", version: "1.2.0", path: "skills/my-skill", cli-version: "0.9.0", visibility: "public" }
+#       secrets: inherit
+name: Publish SkillX release
+
+on:
+  workflow_dispatch:
+    inputs:
+      name:
+        description: "Package identity, @publisher/slug"
+        required: true
+        type: string
+      version:
+        description: "SemVer release version (no build metadata)"
+        required: true
+        type: string
+      path:
+        description: "Package directory inside the repository"
+        required: true
+        type: string
+      channel:
+        description: "Release channel"
+        required: false
+        default: stable
+        type: choice
+        options: [stable, beta, alpha]
+      kind:
+        description: "Package kind"
+        required: false
+        default: skill
+        type: choice
+        options: [skill, hook-pack, bundle]
+      cli-version:
+        description: "Exact skillx-sh CLI version used to pack and upload"
+        required: true
+        type: string
+      visibility:
+        description: "public or private; empty sends no --visibility (a new package is private, an existing one keeps its visibility). Needs a cli-version with --visibility"
+        required: false
+        default: ""
+        type: string
+  workflow_call:
+    inputs:
+      name: { required: true, type: string }
+      version: { required: true, type: string }
+      path: { required: true, type: string }
+      channel: { required: false, default: stable, type: string }
+      kind: { required: false, default: skill, type: string }
+      registry-url: { required: false, default: https://skillx.sh, type: string }
+      cli-version: { required: true, type: string }
+      visibility: { required: false, default: "", type: string }
+    secrets:
+      SKILLX_PUBLISH_KEY:
+        description: "SkillX API key scoped to releases:publish:@<publisher> (prefer a skillx-publish environment secret)"
+        required: false
+    outputs:
+      release-digest:
+        description: "releaseDigest of the published tree"
+        value: ${{ jobs.publish.outputs.release-digest }}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: skillx-publish-${{ inputs.name }}-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.event_name != 'pull_request' && github.event_name != 'pull_request_target'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: skillx-publish
+    outputs:
+      release-digest: ${{ steps.publish.outputs.release-digest }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+
+      - name: Validate inputs
+        env:
+          NAME: ${{ inputs.name }}
+          VERSION: ${{ inputs.version }}
+          PKG_PATH: ${{ inputs.path }}
+          CHANNEL: ${{ inputs.channel }}
+          KIND: ${{ inputs.kind }}
+          REGISTRY: ${{ inputs.registry-url || 'https://skillx.sh' }}
+          CLI_VERSION: ${{ inputs.cli-version }}
+          VISIBILITY: ${{ inputs.visibility }}
+          HAS_KEY: ${{ secrets.SKILLX_PUBLISH_KEY != '' }}
+        run: |
+          set -euo pipefail
+          [[ "$HAS_KEY" == "true" ]] || { echo "::error::SKILLX_PUBLISH_KEY is not set (skillx-publish environment secret)"; exit 1; }
+          [[ "$NAME" =~ ^@[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*$ ]] || { echo "::error::invalid name"; exit 1; }
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "::error::invalid version"; exit 1; }
+          [[ "$PKG_PATH" != -* && "$PKG_PATH" != /* && "$PKG_PATH" != *..* ]] || { echo "::error::invalid path"; exit 1; }
+          [[ "$CHANNEL" =~ ^(stable|beta|alpha)$ ]] || { echo "::error::invalid channel"; exit 1; }
+          [[ "$KIND" =~ ^(skill|hook-pack|bundle)$ ]] || { echo "::error::invalid kind"; exit 1; }
+          [[ "$REGISTRY" =~ ^https://[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]{1,5})?/?$ ]] || { echo "::error::registry-url must be an https origin"; exit 1; }
+          [[ "$CLI_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "::error::cli-version must be an exact version"; exit 1; }
+          [[ "$VISIBILITY" =~ ^(public|private)?$ ]] || { echo "::error::visibility must be public, private or empty"; exit 1; }
+
+      - name: Pack and publish
+        id: publish
+        env:
+          SKILLX_API_KEY: ${{ secrets.SKILLX_PUBLISH_KEY }}
+          NAME: ${{ inputs.name }}
+          VERSION: ${{ inputs.version }}
+          PKG_PATH: ${{ inputs.path }}
+          CHANNEL: ${{ inputs.channel }}
+          KIND: ${{ inputs.kind }}
+          REGISTRY: ${{ inputs.registry-url || 'https://skillx.sh' }}
+          CLI_VERSION: ${{ inputs.cli-version }}
+          VISIBILITY: ${{ inputs.visibility }}
+          REPO_URL: https://github.com/${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # Empty: no flag, so a CLI without --visibility keeps working and the registry default applies.
+          visibility=()
+          [[ -z "$VISIBILITY" ]] || visibility=(--visibility "$VISIBILITY")
+          npx --yes "skillx-sh@${CLI_VERSION}" release publish HEAD \
+            --path "$PKG_PATH" \
+            --name "$NAME" \
+            --release-version "$VERSION" \
+            --channel "$CHANNEL" \
+            --kind "$KIND" \
+            --repo "$REPO_URL" \
+            --registry "$REGISTRY" \
+            "${visibility[@]}" \
+            --json > "$RUNNER_TEMP/release.json"
+          digest="$(node -e 'const j=require(process.argv[1]); const r=j.data ?? j; if(!/^sha256:[0-9a-f]{64}$/.test(r.releaseDigest)) process.exit(1); process.stdout.write(r.releaseDigest)' "$RUNNER_TEMP/release.json")"
+          echo "release-digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "Published $NAME@$VERSION ($digest), state: $(node -e 'const j=require(process.argv[1]); process.stdout.write(String((j.data ?? j).state))' "$RUNNER_TEMP/release.json")" >> "$GITHUB_STEP_SUMMARY"

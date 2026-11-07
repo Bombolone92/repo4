@@ -1,0 +1,295 @@
+> Bản dịch từ [English version](/channels-overview)
+
+# Tổng quan về Channel
+
+Channel kết nối các nền tảng nhắn tin (Telegram, Discord, Larksuite, v.v.) với agent runtime của GoClaw thông qua một message bus thống nhất. Mỗi channel dịch các sự kiện đặc thù của nền tảng thành object `InboundMessage` chuẩn hoá và chuyển đổi phản hồi của agent thành output phù hợp với nền tảng đó.
+
+## Luồng tin nhắn
+
+```mermaid
+flowchart LR
+    TG["Telegram<br/>Discord<br/>Larksuite<br/>Zalo<br/>WhatsApp"]
+
+    TG -->|"Platform event"| Listen["Channel.Start()<br/>Lắng nghe cập nhật"]
+    Listen -->|"Build message"| Handle["HandleMessage()<br/>Trích xuất content, media,<br/>sender ID, chat ID"]
+    Handle -->|"PublishInbound"| Bus["MessageBus"]
+
+    Bus -->|"Route"| Agent["Agent Loop<br/>Xử lý message<br/>Tạo phản hồi"]
+    Agent -->|"OutboundMessage"| Bus
+
+    Bus -->|"DispatchOutbound"| Manager["Manager<br/>Định tuyến đến channel"]
+    Manager -->|"Channel.Send()"| Send["Định dạng + Gửi<br/>Xử lý giới hạn nền tảng"]
+    Send --> TG
+```
+
+## Chính sách Channel
+
+Kiểm soát ai có thể gửi tin nhắn qua DM hoặc cài đặt nhóm.
+
+### Chính sách DM
+
+| Chính sách | Hành vi | Use Case |
+|--------|----------|----------|
+| `pairing` | Yêu cầu mã 8 ký tự để phê duyệt user mới | Truy cập an toàn, có kiểm soát |
+| `allowlist` | Chỉ chấp nhận người gửi trong danh sách trắng | Nhóm hạn chế |
+| `open` | Chấp nhận tất cả DM | Bot công khai |
+| `disabled` | Từ chối tất cả DM | Chỉ dùng trong nhóm |
+
+### Chính sách Nhóm
+
+| Chính sách | Hành vi | Use Case |
+|--------|----------|----------|
+| `open` | Chấp nhận tất cả tin nhắn nhóm | Nhóm công khai |
+| `allowlist` | Chỉ chấp nhận nhóm trong danh sách trắng | Nhóm hạn chế |
+| `disabled` | Không nhận tin nhắn nhóm | Chỉ dùng DM |
+
+### Luồng đánh giá chính sách
+
+```mermaid
+flowchart TD
+    MSG["Tin nhắn đến"] --> KIND{"DM hay<br/>nhóm?"}
+    KIND -->|DM| DPOLICY["Áp dụng chính sách DM"]
+    KIND -->|Nhóm| GPOLICY["Áp dụng chính sách nhóm"]
+
+    DPOLICY --> CHECK{"Chính sách cho phép?"}
+    GPOLICY --> CHECK
+
+    CHECK -->|disabled| REJECT["Từ chối"]
+    CHECK -->|open| ACCEPT["Chấp nhận"]
+    CHECK -->|allowlist| ALLOWED{"Người gửi trong<br/>danh sách trắng?"}
+    ALLOWED -->|Có| ACCEPT
+    ALLOWED -->|Không| REJECT
+    CHECK -->|pairing| PAIRED{"Đã pairing<br/>hoặc trong allowlist?"}
+    PAIRED -->|Có| ACCEPT
+    PAIRED -->|Không| SEND_CODE["Gửi mã pairing<br/>Chờ phê duyệt"]
+```
+
+## Định dạng Session Key
+
+Session key xác định cuộc trò chuyện và luồng duy nhất trên các nền tảng. Tất cả key đều theo định dạng chuẩn `agent:{agentId}:{rest}`.
+
+| Context | Định dạng | Ví dụ |
+|---------|--------|---------|
+| DM | `agent:{agentId}:{channel}:direct:{peerId}` | `agent:default:telegram:direct:386246614` |
+| Nhóm | `agent:{agentId}:{channel}:group:{groupId}` | `agent:default:telegram:group:-100123456` |
+| Forum topic | `agent:{agentId}:{channel}:group:{groupId}:topic:{topicId}` | `agent:default:telegram:group:-100123456:topic:99` |
+| DM thread | `agent:{agentId}:{channel}:direct:{peerId}:thread:{threadId}` | `agent:default:telegram:direct:386246614:thread:5` |
+| Subagent | `agent:{agentId}:subagent:{label}` | `agent:default:subagent:my-task` |
+
+## Ghi chú xử lý Media
+
+### Media từ tin nhắn được reply
+
+GoClaw trích xuất file đính kèm media từ tin nhắn đang được reply trên tất cả các channel có hỗ trợ reply. Khi user reply vào tin nhắn chứa hình ảnh hoặc file, các file đó được tự động đưa vào context tin nhắn đến của agent — không cần thêm bước nào.
+
+### Giới hạn kích thước Media gửi ra
+
+Trường config `media_max_bytes` áp đặt giới hạn kích thước upload media ra ngoài do agent gửi, theo từng channel. File vượt giới hạn sẽ bị bỏ qua và ghi log. Mỗi channel có giá trị mặc định riêng (ví dụ: 20 MB cho Telegram, 30 MB cho Feishu/Lark). Cấu hình theo từng channel nếu cần.
+
+### Gửi nhiều file đính kèm (Batching)
+
+Tool `send_file` có thể gửi nhiều file workspace đã có cùng một lúc. Hai dạng được chấp nhận:
+
+- **Một file:** `path` (kèm `caption` tuỳ chọn).
+- **Theo lô:** `attachments: [{ "path": "...", "caption": "..." }, ...]` — thứ tự file, MIME type, tên file, và caption riêng cho từng file đều được giữ nguyên.
+
+Cách mỗi channel gom một lô phụ thuộc vào những gì nền tảng hỗ trợ:
+
+| Channel | Cách gom | Hành vi |
+|---------|----------|----------|
+| Telegram | Đoạn album | Media tương thích được gom thành album `sendMediaGroup` gồm **2–10** mục. Ảnh/video có thể chung một đoạn; document chỉ gom với document, audio chỉ gom với audio. Audio voice-mode, đoạn đơn lẻ, ảnh quá khổ gửi dưới dạng document, và các chuỗi không tương thích sẽ quay về gửi từng file theo thứ tự. |
+| Discord | Một tin nhắn | Nhiều file (kèm văn bản tuỳ chọn) được gửi trong **một** tin nhắn, tối đa 10 file đính kèm. |
+| Slack và các channel hỗ trợ media khác | Dự phòng theo thứ tự | File được gửi lần lượt theo thứ tự trừ khi adapter công bố khả năng batch mạnh hơn. |
+
+## Inbound Debounce
+
+Khi người dùng gửi dồn dập nhiều tin nhắn (hoặc upload nhiều file cùng lúc), GoClaw gộp chúng thành **một** tin nhắn đến duy nhất trước khi chạy agent — trả lời một lần thay vì một lần cho mỗi mảnh.
+
+Đặt cửa sổ im lặng bằng `gateway.inbound_debounce_ms` (mili-giây):
+
+```json
+{
+  "gateway": {
+    "inbound_debounce_ms": 1500
+  }
+}
+```
+
+- Tin nhắn được buffer theo khóa `channel:chatID:senderID:agentID`. Bộ đếm thời gian reset mỗi khi có tin mới, nên tin gộp chỉ flush sau khi người gửi im lặng đủ cửa sổ đã cấu hình.
+- `0` **tắt** debounce cho text — mỗi tin được dispatch ngay lập tức.
+- **Ghi đè theo agent:** một agent có thể đặt `inbound_debounce_ms` trong `agent_config` của nó để dùng cửa sổ khác với mặc định của gateway.
+- **`/stop` và `/reset` bỏ qua debouncer** — lệnh điều khiển được xử lý ngay và không bao giờ bị buffer.
+- **Sàn media:** tin nhắn mang media không còn bỏ qua debounce. Cửa sổ hiệu lực là `max(giá trị cấu hình, sàn media)`, nên một lần upload nhiều file luôn gộp thành một tin đến kể cả khi debounce text đặt `0`. (Ghi đè khác 0 của agent được tôn trọng nguyên vẹn — operator đặt `500` thì giữ `500`, không phải sàn.) Tin nhắn do tool/subagent nội bộ tạo ra được miễn khỏi sàn này.
+
+## Gửi giống con người (Human-like Delivery)
+
+GoClaw có thể làm cho phản hồi trên channel mang cảm giác trò chuyện hơn — một lời xác nhận nhanh trước một lần chạy dài, các ghi chú tiến độ ngắn trong khi tool đang thực thi, và tách một câu trả lời cuối dài thành vài tin nhắn tự nhiên. Tính năng này được cấu hình dưới `gateway.chat_behavior` và **mặc định bị tắt**.
+
+> Các hành vi này **chỉ liên quan đến việc gửi (delivery-only)**. Lời xác nhận, ghi chú tiến độ, và các phần đã tách không bao giờ được ghi vào lịch sử session hay gửi ngược lại cho model như một phần cuộc trò chuyện — chúng chỉ thay đổi những gì con người thấy trong chat.
+
+```json
+{
+  "gateway": {
+    "chat_behavior": {
+      "enabled": true,
+      "quick_ack": { "enabled": true, "mode": "sidecar_generated" },
+      "intermediate_replies": { "enabled": true },
+      "final_split": { "enabled": true }
+    }
+  }
+}
+```
+
+### Ba hành vi con
+
+| Hành vi con | Chức năng |
+|--------------|--------------|
+| `quick_ack` | Gửi một biên nhận ngắn trước một lần chạy dài không streaming, để người dùng biết bot đang làm việc. |
+| `intermediate_replies` | Gửi các cập nhật tiến độ ngắn trong khi agent đang chạy tool. Độc lập với `quick_ack`. |
+| `final_split` | Tách một phản hồi cuối dài thành một số ít tin nhắn cỡ đoạn văn. |
+
+**Các mode của `quick_ack`:**
+
+| Mode | Hành vi |
+|------|----------|
+| `sidecar_generated` | Một lệnh gọi LLM riêng, có giới hạn, viết một lời xác nhận ngắn có nhận biết ngữ cảnh. |
+| `llm_generated` | Alias tương thích ngược; đây cũng là mode được phân giải mặc định. |
+| `fixed_template` | Gửi chuỗi đầu tiên từ `templates` (mặc định `"Got it. Working on it..."`). |
+| `off` | Không có lời xác nhận. |
+
+Các trường của `quick_ack`: `enabled`, `mode`, `min_delay_ms` (mặc định 1000), `provider`, `model`, `timeout_ms` (mặc định 2500), `max_tokens` (mặc định 40), `max_chars` (mặc định 120), `templates`. Khi `provider`/`model` không được đặt, provider/model của chính agent sẽ được dùng.
+
+**Các mode của `intermediate_replies`** là `sidecar_generated` (mặc định) hoặc `off`. Các trường: `enabled`, `mode`, `provider`, `model`, `timeout_ms` (2500), `max_tokens` (mặc định 60), `max_chars` (mặc định 180). Sidecar chỉ nhận metadata có giới hạn (xem trước tin nhắn, locale, channel/peer, nhãn agent, giai đoạn tool hiện tại) — **không bao giờ** nhận lịch sử session, tham số/output của tool, memory, hay system prompt.
+
+**Các trường của `final_split`**: `enabled`, `min_chars` (mặc định 1200), `max_messages` (mặc định 3), `delay_ms` (mặc định 500). Việc tách rất thận trọng — các phản hồi chứa code fenced, bảng, danh sách, trích dẫn, khối kiểu JSON/XML, hay đoạn chỉ chứa URL sẽ giữ nguyên thành một tin nhắn, và media hoặc các lần gửi streaming không bao giờ bị tách.
+
+### Thứ tự ghi đè
+
+`chat_behavior` có thể đặt ở ba cấp. Thứ tự phân giải là **Channel > Agent > Workspace**:
+
+1. **Workspace** — `gateway.chat_behavior` (nền tảng gốc).
+2. **Agent** — `agents.other_config.delivery_behavior` ghi đè nền tảng workspace.
+3. **Channel** — `channels.<type>.chat_behavior` (hoặc `chat_behavior` của một channel instance) có tiếng nói cuối cùng.
+
+Mỗi cấp chỉ ghi đè những trường mà nó đặt, nên bạn có thể tinh chỉnh một núm điều khiển cho mỗi channel và kế thừa phần còn lại.
+
+> **`block_reply` legacy.** Cờ `gateway.block_reply` cũ (và `block_reply` theo từng channel) vẫn được đọc làm giá trị mặc định kế thừa cho `intermediate_replies.enabled` khi trường mới chưa được đặt.
+
+### Hỗ trợ Channel
+
+Human-like delivery được triển khai bởi các channel áp dụng interface `ChatBehaviorChannel`: **Bitrix24, Discord, Feishu/Lark, Pancake, Slack, Telegram, WhatsApp, Zalo OA, và Zalo Personal**.
+
+## So sánh Channel
+
+| Tính năng | Telegram | Bitrix24 | Discord | Larksuite | Zalo OA | Zalo Pers | WhatsApp |
+|---------|----------|----------|---------|--------|---------|-----------|----------|
+| **Transport** | Long polling | Webhook (OAuth) | Gateway events | WS/Webhook | Long polling | Internal proto | WS bridge |
+| **Hỗ trợ DM** | Có | Có | Có | Có | Có | Có | Có |
+| **Hỗ trợ nhóm** | Có | Có | Có | Có | Không | Có | Có |
+| **Streaming** | Có (typing) | Có | Có (edit) | Có (card) | Không | Không | Không |
+| **Media** | Photos, voice, files | Files (20MB) | Files, embeds | Images, files (30MB) | Images (5MB) | -- | JSON |
+| **Reply media** | Có | -- | Có | Có | -- | -- | -- |
+| **Định dạng phong phú** | HTML | Text | Markdown | Cards | Plain text | Plain text | Plain |
+| **Hỗ trợ thread** | Có | -- | -- | -- | -- | -- | -- |
+| **Reaction** | Có | Có | -- | Có | -- | -- | -- |
+| **Pairing** | Có | Có | Có | Có | Có | Có | Có |
+| **Giới hạn tin nhắn** | 4,096 | 4,000 | 2,000 | 4,000 | 2,000 | 2,000 | N/A |
+
+## Chẩn Đoán Sức Khỏe Kênh
+
+GoClaw theo dõi tình trạng runtime của mỗi channel instance và cung cấp chẩn đoán hành động khi có sự cố. Trạng thái sức khỏe được cung cấp qua WebSocket method `channels.status` và trang tổng quan dashboard.
+
+### Trạng thái sức khỏe
+
+| Trạng thái | Ý nghĩa |
+|------------|---------|
+| `registered` | Channel đã cấu hình nhưng chưa khởi động |
+| `starting` | Channel đang khởi tạo |
+| `healthy` | Hoạt động bình thường |
+| `degraded` | Hoạt động nhưng có vấn đề |
+| `failed` | Đã dừng do lỗi |
+| `stopped` | Dừng thủ công |
+
+### Phân loại lỗi
+
+Khi channel gặp lỗi, GoClaw phân loại lỗi thành một trong bốn danh mục:
+
+| Loại | Nguyên nhân thường gặp | Cách khắc phục |
+|------|------------------------|----------------|
+| `auth` | Token/secret không hợp lệ hoặc hết hạn | Kiểm tra lại thông tin xác thực hoặc xác thực lại |
+| `config` | Thiếu cài đặt bắt buộc, proxy không hợp lệ | Hoàn thành các trường bắt buộc trong cài đặt channel |
+| `network` | Timeout, từ chối kết nối, lỗi DNS | Kiểm tra khả năng kết nối upstream và cài đặt proxy |
+| `unknown` | Lỗi không nhận diện được | Kiểm tra log server để xem lỗi đầy đủ |
+
+Mỗi lỗi bao gồm **gợi ý khắc phục** — hướng dẫn ngắn cho operator chỉ đến giao diện UI cụ thể (panel thông tin xác thực, cài đặt nâng cao, hoặc trang chi tiết) nơi có thể giải quyết vấn đề. Dashboard hiển thị các gợi ý này trực tiếp trên channel card.
+
+### Theo dõi sức khỏe
+
+Hệ thống sức khỏe theo dõi lịch sử lỗi theo từng channel:
+- **Số lần lỗi liên tiếp** — reset khi channel phục hồi
+- **Tổng số lần lỗi** — bộ đếm trọn đời
+- **Thời điểm lỗi đầu tiên/cuối cùng** — để chẩn đoán vấn đề không liên tục
+- **Thời điểm healthy cuối cùng** — khi channel hoạt động lần cuối
+
+---
+
+## Checklist triển khai
+
+Khi thêm channel mới, hãy implement các method sau:
+
+- **`Name()`** — Trả về định danh channel (ví dụ: `"telegram"`)
+- **`Start(ctx)`** — Bắt đầu lắng nghe tin nhắn
+- **`Stop(ctx)`** — Dừng graceful
+- **`Send(ctx, msg)`** — Gửi tin nhắn đến nền tảng
+- **`IsRunning()`** — Báo cáo trạng thái đang chạy
+- **`IsAllowed(senderID)`** — Kiểm tra allowlist
+
+Interface tuỳ chọn:
+
+- **`StreamingChannel`** — Cập nhật tin nhắn theo thời gian thực (chunks, typing indicator)
+- **`ReactionChannel`** — Emoji reaction trạng thái (thinking, done, error)
+- **`WebhookChannel`** — HTTP handler có thể mount trên gateway mux chính
+- **`BlockReplyChannel`** — Ghi đè cài đặt block_reply của gateway
+- **`ChatBehaviorChannel`** — [Human-like delivery](#human-like-delivery) (quick-ack, ghi chú tiến độ, tách cuối). Được triển khai bởi Bitrix24, Discord, Feishu/Lark, Pancake, Slack, Telegram, WhatsApp, Zalo OA, và Zalo Personal.
+- **`ReasoningDeliveryChannel`** — Kiểm soát cách reasoning của model được hiển thị trong chat. Hiện chỉ được triển khai bởi Telegram (xem [Telegram › Reasoning Delivery](/channel-telegram#reasoning-delivery)).
+
+## Pattern phổ biến
+
+### Xử lý tin nhắn
+
+Tất cả channel dùng `BaseChannel.HandleMessage()` để chuyển tiếp tin nhắn đến bus:
+
+```go
+ch.HandleMessage(
+    senderID,        // "telegram:123" hoặc "discord:456@guild"
+    chatID,          // nơi gửi phản hồi
+    content,         // văn bản của user
+    media,           // URL/đường dẫn file
+    metadata,        // gợi ý định tuyến
+    "direct",        // hoặc "group"
+)
+```
+
+### Khớp Allowlist
+
+Hỗ trợ sender ID ghép như `"123|username"`. Allowlist có thể chứa:
+
+- User ID: `"123456"`
+- Username: `"@alice"`
+- Ghép: `"123456|alice"`
+- Wildcard: Không hỗ trợ
+
+### Rate Limiting
+
+Channel có thể áp dụng giới hạn tốc độ theo từng user. Cấu hình qua cài đặt channel hoặc implement logic tuỳ chỉnh.
+
+## Tiếp theo
+
+- [Telegram](/channel-telegram) — Hướng dẫn đầy đủ tích hợp Telegram
+- [Bitrix24](/channel-bitrix24) — Tích hợp imbot qua OAuth portal
+- [Discord](/channel-discord) — Thiết lập Discord bot
+- [Larksuite](/channel-feishu) — Tích hợp Larksuite với streaming card
+- [WebSocket](/channel-websocket) — Agent API trực tiếp qua WS
+- [Browser Pairing](/channel-browser-pairing) — Luồng pairing bằng mã 8 ký tự
+
+<!-- goclaw-source: fabe86b3 | cập nhật: 2026-06-28 -->

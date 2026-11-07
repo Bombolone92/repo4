@@ -1,0 +1,217 @@
+/**
+ * Release ingest: `POST /api/v1/packages/@handle/slug/releases`.
+ *
+ * Order (each step rejects before any later one runs):
+ * name and reserved namespaces (for the requested provider) -> scoped key and publisher ownership ->
+ * signing key -> metadata -> package owner, kind, deletion and visibility -> capped upload -> tar read with limits and tree
+ * digest -> version conflict -> subrequest budget -> exec manifest -> scan -> signed manifest -> R2 artifact, blobs
+ * and manifest (create-only) -> D1 row (last). Release bytes are stored
+ * exactly as uploaded; nothing is sanitized. Kit releases (`@agentkit/*`,
+ * see release-kit.ts) are signed as `skillx.release/v2`, all others as v1.
+ */
+import { ReleaseManifestError } from "@skillx/contracts";
+import type { PackageVisibility, ReleaseProvenance } from "@skillx/contracts";
+import { authorizeReleasePublisher, type AuthorizedPublisher } from "./release-auth";
+import { checkExecManifest } from "./release-exec";
+import { ReleaseHttpError, errorResponse, releaseError } from "./release-http";
+import { BLOB_WRITE_CONCURRENCY, MAX_RELEASE_UPLOAD_BYTES, assertSubrequestBudget } from "./release-limits";
+import { RELEASE_METADATA_HEADER, parseReleaseMetadata, parseReleaseName, publishVisibility, readUploadBody, requestedProvider } from "./release-request";
+import { scanRelease } from "./release-scan";
+import { readTree, sha256Hex } from "./release-tree-read";
+import { assertPackageLive, findPackage, findRelease, insertRelease } from "./release-store";
+import type { ExistingRelease } from "./release-store";
+import { artifactKey, blobKey, forEachLimited, manifestKey, putCreateOnly } from "./r2-create-only";
+import { assertSameKitProvenance } from "./release-kit";
+import { signRelease } from "./sign-manifest";
+import type { RegistrySigner } from "./sign-manifest";
+
+export interface IngestDeps {
+  db: D1Database;
+  bucket: R2Bucket;
+  loadSigner: () => Promise<RegistrySigner>;
+  now?: () => Date;
+  /** Subrequests one publish may spend; defaults to DEFAULT_RELEASE_SUBREQUEST_BUDGET. */
+  subrequestBudget?: number;
+  /** `SKILLX_TOKEN_SECRET`; enables OIDC publish tokens (`sxo_...`). */
+  tokenSecret?: string | null;
+}
+
+/** What the idempotent route already read and authorized, so ingest neither buffers the body nor authenticates twice. */
+export type PreparedUpload = { auth: AuthorizedPublisher; body: Uint8Array };
+type Params = { scope?: string; slug?: string };
+type Kit = { bucket: R2Bucket; provenance: ReleaseProvenance | null };
+
+/**
+ * Publishing never changes the visibility of an existing package: a request
+ * naming another one is refused (409) before anything is written.
+ */
+function assertVisibility(identity: string, requested: PackageVisibility | null, stored: string): void {
+  if (requested === null || requested === stored) return;
+  // Widening (out of private, or to public) needs a signed-in approval, so only the dashboard can do it.
+  const widening = stored === "private" || requested === "public";
+  const where = widening ? "in the dashboard (/dashboard)" : "with `skillx visibility set` or in the dashboard (/dashboard)";
+  throw releaseError(
+    409,
+    "release.visibility_mismatch",
+    `${identity} is ${stored}; publishing a release does not change the visibility of an existing package (requested ${requested}). Change it first ${where}, or publish without a visibility`,
+  );
+}
+
+/** The replay answer for an existing version: same tree (and, for a kit release, same provenance) or 409. */
+async function existingOutcome(
+  identity: string,
+  version: string,
+  existing: ExistingRelease,
+  releaseDigest: string,
+  kit: Kit,
+  visibility: PackageVisibility,
+): Promise<Response> {
+  if (existing.releaseDigest !== releaseDigest) {
+    throw releaseError(409, "release.version_exists", `${identity}@${version} already exists with different content`);
+  }
+  if (kit.provenance !== null) await assertSameKitProvenance(kit.bucket, { manifestKey: existing.manifestKey, releaseDigest }, kit.provenance, `${identity}@${version}`);
+  return Response.json({
+    identity,
+    version,
+    visibility,
+    releaseDigest,
+    artifactDigest: existing.artifactDigest,
+    state: existing.state,
+    manifestKey: existing.manifestKey,
+    created: false,
+  });
+}
+
+async function ingest(request: Request, params: Params, deps: IngestDeps, prepared?: PreparedUpload): Promise<Response> {
+  const header = request.headers.get(RELEASE_METADATA_HEADER);
+  const name = parseReleaseName(params.scope, params.slug, requestedProvider(header));
+  const auth = prepared?.auth ?? (await authorizeReleasePublisher(deps.db, request, name.handle, { tokenSecret: deps.tokenSecret, now: deps.now?.() }));
+  const signer = await deps.loadSigner();
+  const metadata = parseReleaseMetadata(header);
+  const pkg = await findPackage(deps.db, name.identity);
+  if (pkg !== null && pkg.publisherId !== auth.publisherId) {
+    throw releaseError(403, "publisher.not_owner", `${name.identity} belongs to another publisher`);
+  }
+  if (pkg !== null && pkg.kind !== metadata.kind) {
+    throw releaseError(409, "release.kind_conflict", `${name.identity} is a ${pkg.kind} package, not ${metadata.kind}`);
+  }
+  assertPackageLive(name.identity, pkg);
+  if (pkg !== null) assertVisibility(name.identity, metadata.visibility, pkg.visibility);
+  const visibility = publishVisibility(metadata, pkg?.visibility ?? null);
+
+  const body = prepared?.body ?? (await readUploadBody(request, MAX_RELEASE_UPLOAD_BYTES));
+  const { tree, contents } = await readTree(body);
+  const existing = await findRelease(deps.db, name.identity, metadata.version);
+  const kit = { bucket: deps.bucket, provenance: metadata.provenance };
+  if (existing !== null) return existingOutcome(name.identity, metadata.version, existing, tree.digest, kit, visibility);
+
+  // Budget first: an oversized publish is refused before the scan reads or the signer touches anything.
+  const blobs = [...new Map(tree.files.map((f) => [f.sha256, contents.get(f.path)!])).entries()];
+  assertSubrequestBudget(blobs.length, deps.subrequestBudget);
+
+  const exec = await checkExecManifest(contents, metadata.declaredScripts);
+  const scan = scanRelease(tree.files.map((f) => ({ path: f.path, bytes: contents.get(f.path)! })));
+  const artifactHex = await sha256Hex(body);
+  const now = deps.now?.() ?? new Date();
+  let signed: Awaited<ReturnType<typeof signRelease>>;
+  try {
+    signed = await signRelease(
+      {
+        identity: name.identity,
+        version: metadata.version,
+        channel: metadata.channel,
+        kind: metadata.kind,
+        releaseDigest: tree.digest,
+        artifactDigest: `sha256:${artifactHex}`,
+        artifactSize: body.length,
+        files: tree.files.map((f) => ({ path: f.path, mode: f.mode, sha256: f.sha256, size: f.size })),
+        fileCount: tree.files.length,
+        treeSize: tree.files.reduce((sum, f) => sum + f.size, 0),
+        // Publisher handles are provisioned by registry administrators.
+        publisher: { handle: name.handle, verifiedBy: "admin" },
+        sourceProvenance: metadata.sourceProvenance,
+        declaredScripts: metadata.declaredScripts,
+        provenance: metadata.provenance,
+      },
+      signer,
+      now,
+    );
+  } catch (error) {
+    if (!(error instanceof ReleaseManifestError)) throw error;
+    const detail = error.issues.map((i) => `${i.path} ${i.code}`).join(", ");
+    throw releaseError(400, "release.invalid_metadata", `release metadata is invalid: ${detail}`);
+  }
+  const manifestHex = await sha256Hex(signed.bytes);
+  await putCreateOnly(deps.bucket, artifactKey(artifactHex), body, {
+    sha256Hex: artifactHex,
+    contentType: "application/x-tar",
+    verifyExisting: true,
+  });
+  await forEachLimited(blobs, BLOB_WRITE_CONCURRENCY, ([hex, bytes]) =>
+    putCreateOnly(deps.bucket, blobKey(hex), bytes, { sha256Hex: hex, contentType: "application/octet-stream" }),
+  );
+  await putCreateOnly(deps.bucket, manifestKey(manifestHex), signed.bytes, {
+    sha256Hex: manifestHex,
+    contentType: "application/json",
+    verifyExisting: true,
+  });
+
+  const outcome = await insertRelease(deps.db, {
+    publisherId: auth.publisherId,
+    identity: name.identity,
+    slug: name.slug,
+    kind: metadata.kind,
+    visibility,
+    version: metadata.version,
+    channel: metadata.channel,
+    state: scan.state,
+    manifestSchemaVersion: signed.manifest.schemaVersion,
+    artifactKey: artifactKey(artifactHex),
+    artifactDigest: `sha256:${artifactHex}`,
+    artifactSize: body.length,
+    releaseDigest: tree.digest,
+    fileCount: signed.manifest.fileCount,
+    treeSize: signed.manifest.treeSize,
+    manifestKey: manifestKey(manifestHex),
+    sourceProvenance: metadata.sourceProvenance,
+    execSummary: exec.summary,
+    createdAt: now.getTime(),
+  });
+  if (outcome === "conflict") {
+    // A package created concurrently with another visibility is refused like an existing one, also when ours was the default.
+    const current = await findPackage(deps.db, name.identity);
+    assertPackageLive(name.identity, current);
+    if (current !== null && current.publisherId === auth.publisherId && current.kind === metadata.kind) {
+      assertVisibility(name.identity, visibility, current.visibility);
+    }
+    const winner = await findRelease(deps.db, name.identity, metadata.version);
+    // The release insert matched no package row: one with this name was created concurrently by another publisher or kind.
+    if (winner === null) throw releaseError(409, "release.kind_conflict", `${name.identity} was created concurrently with another kind or publisher`);
+    return existingOutcome(name.identity, metadata.version, winner, tree.digest, kit, visibility);
+  }
+  return Response.json({
+    identity: name.identity,
+    version: metadata.version,
+    visibility,
+    releaseDigest: tree.digest,
+    artifactDigest: `sha256:${artifactHex}`,
+    state: scan.state,
+    manifestKey: manifestKey(manifestHex),
+    keyId: signer.keyId,
+    created: true,
+    findings: scan.findings,
+    exec: exec.summary,
+    warnings: exec.warnings,
+  });
+}
+
+/** Handles one upload; every failure becomes a JSON error with a stable code. */
+export async function ingestRelease(request: Request, params: Params, deps: IngestDeps, prepared?: PreparedUpload): Promise<Response> {
+  try {
+    return await ingest(request, params, deps, prepared);
+  } catch (error) {
+    if (error instanceof ReleaseHttpError) return errorResponse(error);
+    console.error("release publish failed:", error instanceof Error ? error.message : String(error));
+    return errorResponse(releaseError(500, "release.internal_error", "release publish failed"));
+  }
+}

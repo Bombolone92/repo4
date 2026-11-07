@@ -1,0 +1,1956 @@
+# Database Schema
+
+> All PostgreSQL tables, columns, types, and constraints across all migrations.
+
+## Overview
+
+GoClaw requires **PostgreSQL 15+** with two extensions:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";  -- UUID v7 generation
+CREATE EXTENSION IF NOT EXISTS "vector";    -- pgvector for embeddings
+```
+
+A custom `uuid_generate_v7()` function provides time-ordered UUIDs. All primary keys use this function by default.
+
+Schema versions are tracked by `golang-migrate`. Run `goclaw migrate up` or `goclaw upgrade` to apply all migrations. Current schema version: **80**.
+
+### v3 Store Unification
+
+In v3, GoClaw introduced a shared `internal/store/base/` package containing a `Dialect` interface plus common helpers (`NilStr`, `BuildMapUpdate`, `BuildScopeClause`, `execMapUpdate`, etc.). Both `pg/` (PostgreSQL) and `sqlitestore/` (SQLite desktop) implement this interface via type aliases, eliminating code duplication. This is an internal refactor — no database schema changes are required and no user action is needed.
+
+SQLite (desktop build) does not support `pgvector` operations. The following features are **PostgreSQL-only**:
+- `episodic_summaries` vector search (HNSW index on `embedding`)
+- `vault_documents` semantic linking (auto-link via vector similarity)
+- `kg_entities` semantic search (HNSW index on `embedding`)
+
+On SQLite, these tables exist but vector columns are unused. Keyword (FTS) search and all other features function normally.
+
+---
+
+## ER Diagram
+
+```mermaid
+erDiagram
+    agents ||--o{ agent_shares : "shared with"
+    agents ||--o{ agent_context_files : "has"
+    agents ||--o{ user_context_files : "has"
+    agents ||--o{ user_agent_profiles : "tracks"
+    agents ||--o{ sessions : "owns"
+    agents ||--o{ memory_documents : "stores"
+    agents ||--o{ memory_chunks : "stores"
+    agents ||--o{ skills : "owns"
+    agents ||--o{ cron_jobs : "schedules"
+    agents ||--o{ channel_instances : "bound to"
+    agents ||--o{ agent_links : "links"
+    agents ||--o{ agent_teams : "leads"
+    agents ||--o{ agent_team_members : "member of"
+    agents ||--o{ kg_entities : "has"
+    agents ||--o{ kg_relations : "has"
+    agents ||--o{ usage_snapshots : "measured in"
+    agent_teams ||--o{ team_tasks : "has"
+    agent_teams ||--o{ team_messages : "has"
+    agent_teams ||--o{ team_workspace_files : "stores"
+    memory_documents ||--o{ memory_chunks : "split into"
+    cron_jobs ||--o{ cron_run_logs : "logs"
+    traces ||--o{ spans : "contains"
+    mcp_servers ||--o{ mcp_agent_grants : "granted to"
+    mcp_servers ||--o{ mcp_user_grants : "granted to"
+    skills ||--o{ skill_agent_grants : "granted to"
+    skills ||--o{ skill_user_grants : "granted to"
+    kg_entities ||--o{ kg_relations : "source of"
+    team_tasks ||--o{ team_task_comments : "has"
+    team_tasks ||--o{ team_task_events : "logs"
+    team_workspace_files ||--o{ team_workspace_file_versions : "versioned by"
+    team_workspace_files ||--o{ team_workspace_comments : "commented on"
+    agents ||--o| agent_heartbeats : "has"
+    agent_heartbeats ||--o{ heartbeat_run_logs : "logs"
+    agents ||--o{ agent_config_permissions : "has"
+    tenants ||--o{ system_configs : "has"
+```
+
+---
+
+## Tables
+
+### `llm_providers`
+
+Registered LLM providers. API keys are encrypted with AES-256-GCM.
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | UUID | PK | UUID v7 |
+| `name` | VARCHAR(50) | UNIQUE NOT NULL | Identifier (e.g. `openrouter`) |
+| `display_name` | VARCHAR(255) | | Human-readable name |
+| `provider_type` | VARCHAR(30) | NOT NULL DEFAULT `openai_compat` | `openai_compat` or `anthropic` |
+| `api_base` | TEXT | | Custom endpoint URL |
+| `api_key` | TEXT | | Encrypted API key |
+| `enabled` | BOOLEAN | NOT NULL DEFAULT true | |
+| `settings` | JSONB | NOT NULL DEFAULT `{}` | Extra provider-specific config |
+| `created_at` | TIMESTAMPTZ | DEFAULT NOW() | |
+| `updated_at` | TIMESTAMPTZ | DEFAULT NOW() | |
+
+---
+
+### `agents`
+
+Core agent records. Each agent has its own context, tools, and model configuration.
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | UUID | PK | UUID v7 |
+| `agent_key` | VARCHAR(100) | UNIQUE NOT NULL | Slug identifier (e.g. `researcher`) |
+| `display_name` | VARCHAR(255) | | UI display name |
+| `owner_id` | VARCHAR(255) | NOT NULL | User ID of creator |
+| `provider` | VARCHAR(50) | NOT NULL DEFAULT `openrouter` | LLM provider |
+| `model` | VARCHAR(200) | NOT NULL | Model ID |
+| `context_window` | INT | NOT NULL DEFAULT 200000 | Context window in tokens |
+| `max_tool_iterations` | INT | NOT NULL DEFAULT 20 | Max tool rounds per run |
+| `workspace` | TEXT | NOT NULL DEFAULT `.` | Workspace directory path |
+| `restrict_to_workspace` | BOOLEAN | NOT NULL DEFAULT true | Sandbox file access to workspace |
+| `tools_config` | JSONB | NOT NULL DEFAULT `{}` | Tool policy overrides |
+| `sandbox_config` | JSONB | | Docker sandbox configuration |
+| `subagents_config` | JSONB | | Subagent concurrency configuration |
+| `memory_config` | JSONB | | Memory system configuration |
+| `compaction_config` | JSONB | | Session compaction configuration |
+| `context_pruning` | JSONB | | Context pruning configuration |
+| `other_config` | JSONB | NOT NULL DEFAULT `{}` | Miscellaneous config (e.g. `description` for summoning) |
+| `is_default` | BOOLEAN | NOT NULL DEFAULT false | Marks the default agent |
+| `agent_type` | VARCHAR(20) | NOT NULL DEFAULT `open` | `open` or `predefined` |
+| `status` | VARCHAR(20) | DEFAULT `active` | `active`, `inactive`, `summoning` |
+| `frontmatter` | TEXT | | Short expertise summary for delegation and UI |
+| `tsv` | tsvector | GENERATED ALWAYS | Full-text search vector (display_name + frontmatter) |
+| `embedding` | vector(1536) | | Semantic search embedding |
+| `budget_monthly_cents` | INTEGER | | Monthly spend cap in USD cents; NULL = unlimited (migration 015). Migration 072 bridges any non-NULL value into a `month`-window `usage_cap_policies` row with `source = 'agent_budget_monthly_cents'` (1 cent = 10,000 micros). |
+| `model_fallback` | JSONB | NOT NULL DEFAULT `{}` | Ordered array of fallback model identifiers tried when primary model fails (migration 065) |
+| `created_at` | TIMESTAMPTZ | DEFAULT NOW() | |
+| `updated_at` | TIMESTAMPTZ | DEFAULT NOW() | |
+| `deleted_at` | TIMESTAMPTZ | | Soft delete timestamp |
+
+**Indexes:** `owner_id`, `status` (partial, non-deleted), `tsv` (GIN), `embedding` (HNSW cosine)
+
+---
+
+### `agent_shares`
+
+Grants another user access to an agent.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | UUID PK | |
+| `agent_id` | UUID FK → agents | |
+| `user_id` | VARCHAR(255) | Grantee |
+| `role` | VARCHAR(20) DEFAULT `user` | `user`, `operator`, `admin` |
+| `granted_by` | VARCHAR(255) | Who granted access |
+| `created_at` | TIMESTAMPTZ | |
+
+---
+
+### `agent_context_files`
+
+Per-agent context files (SOUL.md, IDENTITY.md, etc.). Shared across all users of the agent.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | UUID PK | |
+| `agent_id` | UUID FK → agents | |
+| `file_name` | VARCHAR(255) | Filename (e.g. `SOUL.md`) |
+| `content` | TEXT | File content |
+| `created_at` | TIMESTAMPTZ | |
+| `updated_at` | TIMESTAMPTZ | |
+
+**Unique:** `(agent_id, file_name)`
+
+---
+
+### `user_context_files`
+
+Per-user, per-agent context files (USER.md, etc.). Private to each user.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | UUID PK | |
+| `agent_id` | UUID FK → agents | |
+| `user_id` | VARCHAR(255) | |
+| `file_name` | VARCHAR(255) | |
+| `content` | TEXT | |
+| `created_at` / `updated_at` | TIMESTAMPTZ | |
+
+**Unique:** `(agent_id, user_id, file_name)`
+
+---
+
+### `user_agent_profiles`
+
+Tracks first/last seen timestamps per user per agent.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `agent_id` | UUID FK → agents | |
+| `user_id` | VARCHAR(255) | |
+| `workspace` | TEXT | Per-user workspace override |
+| `first_seen_at` | TIMESTAMPTZ | |
+| `last_seen_at` | TIMESTAMPTZ | |
+| `metadata` | JSONB DEFAULT `{}` | Arbitrary profile metadata (migration 011) |
+
+**PK:** `(agent_id, user_id)`
+
+---
+
+### `user_agent_overrides`
+
+Per-user model/provider overrides for a specific agent.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | UUID PK | |
+| `agent_id` | UUID FK → agents | |
+| `user_id` | VARCHAR(255) | |
+| `provider` | VARCHAR(50) | Override provider |
+| `model` | VARCHAR(200) | Override model |
+| `settings` | JSONB | Extra settings |
+
+---
+
+### `sessions`
+
+Chat sessions. One session per channel/user/agent combination.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | UUID PK | |
+| `session_key` | VARCHAR(500) UNIQUE | Composite key (e.g. `telegram:123456789`) |
+| `agent_id` | UUID FK → agents | |
+| `user_id` | VARCHAR(255) | |
+| `messages` | JSONB DEFAULT `[]` | Full message history |
+| `summary` | TEXT | Compacted summary |
+| `model` | VARCHAR(200) | Active model for this session |
+| `provider` | VARCHAR(50) | Active provider |
+| `channel` | VARCHAR(50) | Origin channel |
+| `input_tokens` | BIGINT DEFAULT 0 | Cumulative input token count |
+| `output_tokens` | BIGINT DEFAULT 0 | Cumulative output token count |
+| `compaction_count` | INT DEFAULT 0 | Number of compactions performed |
+| `memory_flush_compaction_count` | INT DEFAULT 0 | Compactions with memory flush |
+| `label` | VARCHAR(500) | Human-readable session label |
+| `spawned_by` | VARCHAR(200) | Parent session key (for subagents) |
+| `spawn_depth` | INT DEFAULT 0 | Nesting depth |
+| `metadata` | JSONB DEFAULT `{}` | Arbitrary session metadata (migration 011) |
+| `team_id` | UUID FK → agent_teams (nullable) | Set for team-scoped sessions (migration 019) |
+| `created_at` / `updated_at` | TIMESTAMPTZ | |
+
+**Indexes:** `agent_id`, `user_id`, `updated_at DESC`, `team_id` (partial)
+
+---
+
+### `memory_documents` and `memory_chunks`
+
+Hybrid BM25 + vector memory system.
+
+**`memory_documents`** — top-level indexed documents:
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | UUID PK | |
+| `agent_id` | UUID FK → agents | |
+| `user_id` | VARCHAR(255) | Null = global (shared) |
+| `path` | VARCHAR(500) | Logical document path/title |
+| `content` | TEXT | Full document content |
+| `hash` | VARCHAR(64) | SHA-256 of content for change detection |
+| `team_id` | UUID FK → agent_teams (nullable) | Team scope; NULL = personal (migration 019) |
+
+**`memory_chunks`** — searchable segments of documents:
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | UUID PK | |
+| `agent_id` | UUID FK → agents | |
+| `document_id` | UUID FK → memory_documents | |
+| `user_id` | VARCHAR(255) | |
+| `path` | TEXT | Source path |
+| `start_line` / `end_line` | INT | Source line range |
+| `hash` | VARCHAR(64) | Chunk content hash |
+| `text` | TEXT | Chunk content |
+| `embedding` | vector(1536) | Semantic embedding |
+| `tsv` | tsvector GENERATED | Full-text search (simple config, multilingual) |
+| `team_id` | UUID FK → agent_teams (nullable) | Team scope; NULL = personal (migration 019) |
+
+**Indexes:** agent+user (standard + partial for global), document, GIN on tsv, HNSW cosine on embedding, `team_id` (partial)
+
+**`embedding_cache`** — deduplicates embedding API calls:
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `hash` | VARCHAR(64) | Content hash |
+| `provider` | VARCHAR(50) | Embedding provider |
+| `model` | VARCHAR(200) | Embedding model |
+| `embedding` | vector(1536) | Cached vector |
+| `dims` | INT | Embedding dimensions |
+
+**PK:** `(hash, provider, model)`
+
+---
+
+### `skills`
+
+Uploaded skill packages with BM25 + semantic search.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | UUID PK | |
+| `name` | VARCHAR(255) | Display name |
+| `slug` | VARCHAR(255) UNIQUE | URL-safe identifier |
+| `description` | TEXT | Short description |
+| `owner_id` | VARCHAR(255) | Creator user ID |
+| `visibility` | VARCHAR(10) DEFAULT `private` | `private` or `public` |
+| `version` | INT DEFAULT 1 | Version counter |
+| `status` | VARCHAR(20) DEFAULT `active` | `active` or `archived` |
+| `frontmatter` | JSONB | Skill metadata from SKILL.md |
+| `file_path` | TEXT | Filesystem path to skill content |
+| `file_size` | BIGINT | File size in bytes |
+| `file_hash` | VARCHAR(64) | Content hash |
+| `embedding` | vector(1536) | Semantic search embedding |
+| `tags` | TEXT[] | Tag list |
+| `is_system` | BOOLEAN DEFAULT false | Built-in system skill; not user-deletable (migration 017) |
+| `deps` | JSONB DEFAULT `{}` | Skill dependency declarations (migration 017) |
+| `enabled` | BOOLEAN DEFAULT true | Whether skill is active (migration 017) |
+
+**Indexes:** owner, visibility (partial active), slug, HNSW embedding, GIN tags, `is_system` (partial true), `enabled` (partial false)
+
+**`skill_agent_grants`** / **`skill_user_grants`** — access control for skills, same pattern as MCP grants. `skill_agent_grants` also has `can_manage BOOLEAN NOT NULL DEFAULT FALSE` (migration 066) — grants the agent permission to manage (publish, update, delete) the skill. As of migration 078, `skill_user_grants` is uniquely keyed on `(skill_id, user_id, tenant_id)` (tenant-scoped), so the same user can be granted the same skill in different tenants.
+
+---
+
+### `cron_jobs`
+
+Scheduled agent tasks.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | UUID PK | |
+| `agent_id` | UUID FK → agents | |
+| `user_id` | TEXT | Owning user |
+| `name` | VARCHAR(255) | Human-readable job name |
+| `enabled` | BOOLEAN DEFAULT true | |
+| `schedule_kind` | VARCHAR(10) | `at`, `every`, or `cron` |
+| `cron_expression` | VARCHAR(100) | Cron expression (when kind=`cron`) |
+| `interval_ms` | BIGINT | Interval in ms (when kind=`every`) |
+| `run_at` | TIMESTAMPTZ | One-shot run time (when kind=`at`) |
+| `timezone` | VARCHAR(50) | Timezone for cron expressions |
+| `payload` | JSONB | Message payload sent to agent |
+| `delete_after_run` | BOOLEAN DEFAULT false | Self-delete after first successful run |
+| `stateless` | BOOLEAN DEFAULT false | Stateless mode — run without session history |
+| `deliver` | BOOLEAN DEFAULT false | Deliver result to channel |
+| `deliver_channel` | TEXT | Target channel type (`telegram`, `discord`, etc.) |
+| `deliver_to` | TEXT | Chat/recipient ID |
+| `wake_heartbeat` | BOOLEAN DEFAULT false | Trigger heartbeat after job completes |
+| `next_run_at` | TIMESTAMPTZ | Calculated next execution time |
+| `last_run_at` | TIMESTAMPTZ | Last execution time |
+| `last_status` | VARCHAR(20) | `ok`, `error`, `running` |
+| `last_error` | TEXT | Last error message |
+| `team_id` | UUID FK → agent_teams (nullable) | Team scope; NULL = personal (migration 019) |
+
+**`cron_run_logs`** — per-run history with token counts and duration. `team_id` column also added (migration 019).
+
+**Unique:** `uq_cron_jobs_agent_tenant_name` on `(agent_id, tenant_id, name)` (migration 047 — prevents duplicate cron job entries).
+
+---
+
+### `pairing_requests` and `paired_devices`
+
+Device pairing flow (channel users requesting access).
+
+**`pairing_requests`** — pending 8-character codes:
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `code` | VARCHAR(8) UNIQUE | Pairing code shown to user |
+| `sender_id` | VARCHAR(200) | Channel user ID |
+| `channel` | VARCHAR(255) | Channel name |
+| `chat_id` | VARCHAR(200) | Chat ID |
+| `expires_at` | TIMESTAMPTZ | Code expiry |
+
+**`paired_devices`** — approved pairings:
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `sender_id` | VARCHAR(200) | |
+| `channel` | VARCHAR(255) | |
+| `chat_id` | VARCHAR(200) | |
+| `paired_by` | VARCHAR(100) | Who approved |
+| `paired_at` | TIMESTAMPTZ | |
+| `metadata` | JSONB DEFAULT `{}` | Arbitrary pairing metadata (migration 011) |
+| `expires_at` | TIMESTAMPTZ | Pairing expiry; NULL = no expiry (migration 021) |
+
+**Unique:** `(sender_id, channel)`
+
+> `pairing_requests` also received `metadata JSONB DEFAULT '{}'` in migration 011.
+
+---
+
+### `traces` and `spans`
+
+LLM call tracing.
+
+**`traces`** — one record per agent run:
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | UUID PK | |
+| `agent_id` | UUID | |
+| `user_id` | VARCHAR(255) | |
+| `session_key` | TEXT | |
+| `run_id` | TEXT | |
+| `parent_trace_id` | UUID | For delegation — links to parent run's trace |
+| `status` | VARCHAR(20) | `running`, `ok`, `error` |
+| `total_input_tokens` | INT | |
+| `total_output_tokens` | INT | |
+| `total_cost` | NUMERIC(12,6) | Estimated cost |
+| `span_count` / `llm_call_count` / `tool_call_count` | INT | Summary counters |
+| `input_preview` / `output_preview` | TEXT | Truncated first/last message |
+| `tags` | TEXT[] | Searchable tags |
+| `metadata` | JSONB | |
+
+**`spans`** — individual LLM calls and tool invocations within a trace:
+
+Key columns: `trace_id`, `parent_span_id`, `span_type` (`llm`, `tool`, `agent`), `model`, `provider`, `input_tokens`, `output_tokens`, `total_cost`, `tool_name`, `finish_reason`.
+
+**Indexes:** Optimized for agent+time, user+time, session, status=error. Partial index `idx_traces_quota` on `(user_id, created_at DESC)` filters `parent_trace_id IS NULL` for quota counting. Both `traces` and `spans` have `team_id UUID FK → agent_teams` (nullable, migration 019) with partial indexes. `traces` also has `idx_traces_start_root` on `(start_time DESC) WHERE parent_trace_id IS NULL` and `spans` has `idx_spans_trace_type` on `(trace_id, span_type)` (migration 016).
+
+---
+
+### `mcp_servers`
+
+External MCP (Model Context Protocol) tool providers.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | UUID PK | |
+| `name` | VARCHAR(255) UNIQUE | Server name |
+| `transport` | VARCHAR(50) | `stdio`, `sse`, `streamable-http` |
+| `command` | TEXT | Stdio: command to spawn |
+| `args` | JSONB | Stdio: arguments |
+| `url` | TEXT | SSE/HTTP: server URL |
+| `headers` | JSONB | SSE/HTTP: HTTP headers |
+| `env` | JSONB | Stdio: environment variables |
+| `api_key` | TEXT | Encrypted API key |
+| `tool_prefix` | VARCHAR(50) | Optional tool name prefix |
+| `timeout_sec` | INT DEFAULT 60 | |
+| `enabled` | BOOLEAN DEFAULT true | |
+
+**`mcp_agent_grants`** / **`mcp_user_grants`** — per-agent and per-user access grants with optional tool allowlists/denylists.
+
+**`mcp_access_requests`** — approval workflow for agents requesting MCP access.
+
+---
+
+### `custom_tools`
+
+Dynamic shell-command-backed tools managed via the API.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | UUID PK | |
+| `name` | VARCHAR(100) | Tool name |
+| `description` | TEXT | Shown to the LLM |
+| `parameters` | JSONB | JSON Schema for tool parameters |
+| `command` | TEXT | Shell command to execute |
+| `working_dir` | TEXT | Working directory |
+| `timeout_seconds` | INT DEFAULT 60 | |
+| `env` | BYTEA | Encrypted environment variables |
+| `agent_id` | UUID FK → agents (nullable) | Null = global tool |
+| `enabled` | BOOLEAN DEFAULT true | |
+
+**Unique:** name globally (when `agent_id IS NULL`), `(name, agent_id)` per agent.
+
+---
+
+### `channel_instances`
+
+Database-managed channel connections (replaces static config-file channel setup).
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | UUID PK | |
+| `name` | VARCHAR(100) UNIQUE | Instance name |
+| `channel_type` | VARCHAR(50) | `telegram`, `discord`, `feishu`, `zalo_oa`, `zalo_personal`, `whatsapp` |
+| `agent_id` | UUID FK → agents | Bound agent |
+| `credentials` | BYTEA | Encrypted channel credentials |
+| `config` | JSONB | Channel-specific configuration |
+| `enabled` | BOOLEAN DEFAULT true | |
+
+---
+
+### `agent_links`
+
+Inter-agent delegation permissions. Source agent can delegate tasks to target agent.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | UUID PK | |
+| `source_agent_id` | UUID FK → agents | Delegating agent |
+| `target_agent_id` | UUID FK → agents | Delegate agent |
+| `direction` | VARCHAR(20) DEFAULT `outbound` | |
+| `description` | TEXT | Link description shown during delegation |
+| `max_concurrent` | INT DEFAULT 3 | Max concurrent delegations |
+| `team_id` | UUID FK → agent_teams (nullable) | Set when link was created by a team |
+| `status` | VARCHAR(20) DEFAULT `active` | |
+
+---
+
+### `agent_teams`, `agent_team_members`, `team_tasks`, `team_messages`
+
+Collaborative multi-agent coordination.
+
+**`agent_teams`** — team records with a lead agent.
+
+**`agent_team_members`** — many-to-many `(team_id, agent_id)` with role (`lead`, `member`).
+
+**`team_tasks`** — shared task list:
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `subject` | VARCHAR(500) | Task title |
+| `description` | TEXT | Full task description |
+| `status` | VARCHAR(20) DEFAULT `pending` | `pending`, `in_progress`, `completed`, `cancelled` |
+| `owner_agent_id` | UUID | Agent that claimed the task |
+| `blocked_by` | UUID[] DEFAULT `{}` | Task IDs this task is blocked by |
+| `priority` | INT DEFAULT 0 | Higher = higher priority |
+| `result` | TEXT | Task output |
+| `task_type` | VARCHAR(30) DEFAULT `general` | Task category (migration 018) |
+| `task_number` | INT DEFAULT 0 | Sequential number per team (migration 018) |
+| `identifier` | VARCHAR(20) | Human-readable ID e.g. `TSK-1` (migration 018) |
+| `created_by_agent_id` | UUID FK → agents | Agent that created the task (migration 018) |
+| `assignee_user_id` | VARCHAR(255) | Human user assignee (migration 018) |
+| `parent_id` | UUID FK → team_tasks | Parent task for subtasks (migration 018) |
+| `chat_id` | VARCHAR(255) DEFAULT `''` | Originating chat (migration 018) |
+| `locked_at` | TIMESTAMPTZ | When task lock was acquired (migration 018) |
+| `lock_expires_at` | TIMESTAMPTZ | Lock TTL (migration 018) |
+| `progress_percent` | INT DEFAULT 0 | 0–100 completion indicator (migration 018) |
+| `progress_step` | TEXT | Current progress description (migration 018) |
+| `followup_at` | TIMESTAMPTZ | Next followup reminder time (migration 018) |
+| `followup_count` | INT DEFAULT 0 | Number of followups sent (migration 018) |
+| `followup_max` | INT DEFAULT 0 | Max followups to send (migration 018) |
+| `followup_message` | TEXT | Message to send at followup (migration 018) |
+| `followup_channel` | VARCHAR(60) | Channel for followup delivery (migration 018) |
+| `followup_chat_id` | VARCHAR(255) | Chat ID for followup delivery (migration 018) |
+| `confidence_score` | FLOAT | Agent self-assessment score (migration 021) |
+
+**Indexes:** `parent_id` (partial), `(team_id, channel, chat_id)`, `(team_id, task_type)`, `lock_expires_at` (partial in_progress), `(team_id, identifier)` (unique partial), `followup_at` (partial in_progress), `blocked_by` (GIN), `(team_id, owner_agent_id, status)`
+
+**`team_messages`** — peer-to-peer mailbox between agents within a team. Received `confidence_score FLOAT` in migration 021.
+
+---
+
+### `builtin_tools`
+
+Registry of built-in gateway tools with enable/disable control.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `name` | VARCHAR(100) PK | Tool name (e.g. `exec`, `read_file`) |
+| `display_name` | VARCHAR(255) | |
+| `description` | TEXT | |
+| `category` | VARCHAR(50) DEFAULT `general` | Tool category |
+| `enabled` | BOOLEAN DEFAULT true | Global enable/disable |
+| `settings` | JSONB | Tool-specific settings |
+| `requires` | TEXT[] | Required external dependencies |
+
+---
+
+### `config_secrets`
+
+Encrypted key-value store for secrets that override `config.json` values (managed via the web UI).
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `key` | VARCHAR(100) PK | Secret key name |
+| `value` | BYTEA | AES-256-GCM encrypted value |
+
+---
+
+### `group_file_writers`
+
+> **Removed in migration 023.** Data was migrated into `agent_config_permissions` (`config_type = 'file_writer'`).
+
+---
+
+### `channel_pending_messages`
+
+Group chat message buffer. Persists messages when the bot is not mentioned so that full conversational context is available when it is mentioned. Supports LLM-based compaction (`is_summary` rows) and 7-day TTL cleanup. (migration 012)
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | UUID | PK | UUID v7 |
+| `channel_name` | VARCHAR(100) | NOT NULL | Channel instance name |
+| `history_key` | VARCHAR(200) | NOT NULL | Composite key scoping the conversation buffer |
+| `sender` | VARCHAR(255) | NOT NULL | Display name of sender |
+| `sender_id` | VARCHAR(255) | NOT NULL DEFAULT `''` | Platform user ID |
+| `body` | TEXT | NOT NULL | Raw message text |
+| `platform_msg_id` | VARCHAR(100) | NOT NULL DEFAULT `''` | Native platform message ID |
+| `is_summary` | BOOLEAN | NOT NULL DEFAULT false | True if this row is a compacted summary |
+| `created_at` | TIMESTAMPTZ | NOT NULL DEFAULT NOW() | |
+| `updated_at` | TIMESTAMPTZ | NOT NULL DEFAULT NOW() | |
+
+**Indexes:** `(channel_name, history_key, created_at)`
+
+---
+
+### `kg_entities`
+
+Knowledge graph entity nodes scoped per agent and user. (migration 013)
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | UUID | PK | |
+| `agent_id` | UUID FK → agents | NOT NULL | Owning agent (cascade delete) |
+| `user_id` | VARCHAR(255) | NOT NULL DEFAULT `''` | User scope; empty = agent-global |
+| `external_id` | VARCHAR(255) | NOT NULL | Caller-supplied entity identifier |
+| `name` | TEXT | NOT NULL | Entity display name |
+| `entity_type` | VARCHAR(100) | NOT NULL | e.g. `person`, `company`, `concept` |
+| `description` | TEXT | DEFAULT `''` | Free-text description |
+| `properties` | JSONB | DEFAULT `{}` | Structured entity attributes |
+| `source_id` | VARCHAR(255) | DEFAULT `''` | Source document/chunk reference |
+| `confidence` | FLOAT | NOT NULL DEFAULT 1.0 | Extraction confidence score |
+| `team_id` | UUID FK → agent_teams (nullable) | | Team scope; NULL = personal (migration 019) |
+| `created_at` / `updated_at` | TIMESTAMPTZ | | |
+
+**Unique:** `(agent_id, user_id, external_id)`
+
+**Indexes:** `(agent_id, user_id)`, `(agent_id, user_id, entity_type)`, `team_id` (partial)
+
+---
+
+### `kg_relations`
+
+Knowledge graph edges between entities. (migration 013)
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | UUID | PK | |
+| `agent_id` | UUID FK → agents | NOT NULL | Owning agent (cascade delete) |
+| `user_id` | VARCHAR(255) | NOT NULL DEFAULT `''` | User scope |
+| `source_entity_id` | UUID FK → kg_entities | NOT NULL | Source node (cascade delete) |
+| `relation_type` | VARCHAR(200) | NOT NULL | Relation label e.g. `works_at`, `knows` |
+| `target_entity_id` | UUID FK → kg_entities | NOT NULL | Target node (cascade delete) |
+| `confidence` | FLOAT | NOT NULL DEFAULT 1.0 | Extraction confidence score |
+| `properties` | JSONB | DEFAULT `{}` | Relation attributes |
+| `team_id` | UUID FK → agent_teams (nullable) | | Team scope; NULL = personal (migration 019) |
+| `created_at` | TIMESTAMPTZ | | |
+
+**Unique:** `(agent_id, user_id, source_entity_id, relation_type, target_entity_id)`
+
+**Indexes:** `(source_entity_id, relation_type)`, `target_entity_id`, `team_id` (partial)
+
+---
+
+### `channel_contacts`
+
+Global unified contact directory auto-collected from all channel interactions. Not per-agent. Used for contact selector, analytics, and future RBAC. (migration 014)
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | UUID | PK | |
+| `channel_type` | VARCHAR(50) | NOT NULL | e.g. `telegram`, `discord` |
+| `channel_instance` | VARCHAR(255) | | Instance name (nullable) |
+| `sender_id` | VARCHAR(255) | NOT NULL | Platform-native user ID |
+| `user_id` | VARCHAR(255) | | Matched GoClaw user ID |
+| `display_name` | VARCHAR(255) | | Resolved display name |
+| `username` | VARCHAR(255) | | Platform username/handle |
+| `avatar_url` | TEXT | | Profile image URL |
+| `peer_kind` | VARCHAR(20) | | e.g. `user`, `bot`, `group` |
+| `metadata` | JSONB | DEFAULT `{}` | Extra platform-specific data |
+| `thread_id` | VARCHAR(100) | | Thread/topic identifier within a chat (migration 035) |
+| `thread_type` | VARCHAR(20) | | Thread type classifier (migration 035) |
+| `merged_id` | UUID | | Canonical contact after de-duplication |
+| `first_seen_at` | TIMESTAMPTZ | NOT NULL DEFAULT NOW() | |
+| `last_seen_at` | TIMESTAMPTZ | NOT NULL DEFAULT NOW() | |
+
+**Unique:** `(tenant_id, channel_type, sender_id, COALESCE(thread_id, ''))`
+
+**Indexes:** `channel_instance` (partial non-null), `merged_id` (partial non-null), `(display_name, username)`
+
+---
+
+### `activity_logs`
+
+Immutable audit trail for user and system actions. (migration 015)
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | UUID | PK | UUID v7 |
+| `actor_type` | VARCHAR(20) | NOT NULL | `user`, `agent`, `system` |
+| `actor_id` | VARCHAR(255) | NOT NULL | User or agent ID |
+| `action` | VARCHAR(100) | NOT NULL | e.g. `agent.create`, `skill.delete` |
+| `entity_type` | VARCHAR(50) | | Type of affected entity |
+| `entity_id` | VARCHAR(255) | | ID of affected entity |
+| `details` | JSONB | | Action-specific context |
+| `ip_address` | VARCHAR(45) | | Client IP (IPv4 or IPv6) |
+| `created_at` | TIMESTAMPTZ | NOT NULL DEFAULT NOW() | |
+
+**Indexes:** `(actor_type, actor_id)`, `action`, `(entity_type, entity_id)`, `created_at DESC`
+
+---
+
+### `usage_snapshots`
+
+Hourly pre-aggregated metrics per agent/provider/model/channel combination. Populated by a background snapshot worker that reads `traces` and `spans`. (migration 016)
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | UUID PK | UUID v7 |
+| `bucket_hour` | TIMESTAMPTZ | Hour bucket (truncated to hour) |
+| `agent_id` | UUID (nullable) | Agent scope; NULL = system-wide |
+| `provider` | VARCHAR(50) DEFAULT `''` | LLM provider |
+| `model` | VARCHAR(200) DEFAULT `''` | Model ID |
+| `channel` | VARCHAR(50) DEFAULT `''` | Channel name |
+| `input_tokens` | BIGINT DEFAULT 0 | |
+| `output_tokens` | BIGINT DEFAULT 0 | |
+| `cache_read_tokens` | BIGINT DEFAULT 0 | |
+| `cache_create_tokens` | BIGINT DEFAULT 0 | |
+| `thinking_tokens` | BIGINT DEFAULT 0 | |
+| `total_cost` | NUMERIC(12,6) DEFAULT 0 | Estimated USD cost |
+| `request_count` | INT DEFAULT 0 | |
+| `llm_call_count` | INT DEFAULT 0 | |
+| `tool_call_count` | INT DEFAULT 0 | |
+| `error_count` | INT DEFAULT 0 | |
+| `unique_users` | INT DEFAULT 0 | Distinct users in bucket |
+| `avg_duration_ms` | INT DEFAULT 0 | Average request duration |
+| `memory_docs` | INT DEFAULT 0 | Point-in-time memory document count |
+| `memory_chunks` | INT DEFAULT 0 | Point-in-time memory chunk count |
+| `kg_entities` | INT DEFAULT 0 | Point-in-time KG entity count |
+| `kg_relations` | INT DEFAULT 0 | Point-in-time KG relation count |
+| `created_at` | TIMESTAMPTZ | |
+
+**Unique:** `(bucket_hour, COALESCE(agent_id, '00000000...'), provider, model, channel)` — enables safe upserts.
+
+**Indexes:** `bucket_hour DESC`, `(agent_id, bucket_hour DESC)`, `(provider, bucket_hour DESC)` (partial non-empty), `(channel, bucket_hour DESC)` (partial non-empty)
+
+---
+
+### `team_workspace_files`
+
+Shared file storage scoped by `(team_id, chat_id)`. Supports pinning, tagging, and soft-archiving. (migration 018)
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | UUID | PK | UUID v7 |
+| `team_id` | UUID FK → agent_teams | NOT NULL | Owning team |
+| `channel` | VARCHAR(50) DEFAULT `''` | | Channel context |
+| `chat_id` | VARCHAR(255) DEFAULT `''` | | System-derived user/chat ID |
+| `file_name` | VARCHAR(255) | NOT NULL | Display file name |
+| `mime_type` | VARCHAR(100) | | MIME type |
+| `file_path` | TEXT | NOT NULL | Storage path |
+| `size_bytes` | BIGINT DEFAULT 0 | | File size |
+| `uploaded_by` | UUID FK → agents | NOT NULL | Uploader agent |
+| `task_id` | UUID FK → team_tasks (nullable) | | Linked task |
+| `pinned` | BOOLEAN DEFAULT false | | Pinned to workspace |
+| `tags` | TEXT[] DEFAULT `{}` | | Searchable tags |
+| `metadata` | JSONB | | Extra metadata |
+| `archived_at` | TIMESTAMPTZ | | Soft delete timestamp |
+| `created_at` / `updated_at` | TIMESTAMPTZ | | |
+
+**Unique:** `(team_id, chat_id, file_name)`
+
+**Indexes:** `(team_id, chat_id)`, `uploaded_by`, `task_id` (partial), `archived_at` (partial), `(team_id, pinned)` (partial true), `tags` (GIN)
+
+---
+
+### `team_workspace_file_versions`
+
+Version history for workspace files. Each upload of a new version creates a row. (migration 018)
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | UUID | PK | UUID v7 |
+| `file_id` | UUID FK → team_workspace_files | NOT NULL | Parent file |
+| `version` | INT | NOT NULL | Version number |
+| `file_path` | TEXT | NOT NULL | Storage path for this version |
+| `size_bytes` | BIGINT DEFAULT 0 | | |
+| `uploaded_by` | UUID FK → agents | NOT NULL | |
+| `created_at` | TIMESTAMPTZ | NOT NULL | |
+
+**Unique:** `(file_id, version)`
+
+---
+
+### `team_workspace_comments`
+
+Annotations on workspace files. (migration 018)
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | UUID | PK | UUID v7 |
+| `file_id` | UUID FK → team_workspace_files | NOT NULL | Commented file |
+| `agent_id` | UUID FK → agents | NOT NULL | Commenting agent |
+| `content` | TEXT | NOT NULL | Comment text |
+| `created_at` | TIMESTAMPTZ | NOT NULL | |
+
+**Index:** `file_id`
+
+---
+
+### `team_task_comments`
+
+Discussion thread on a task. (migration 018)
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | UUID | PK | UUID v7 |
+| `task_id` | UUID FK → team_tasks | NOT NULL | Parent task |
+| `agent_id` | UUID FK → agents (nullable) | | Commenting agent |
+| `user_id` | VARCHAR(255) | | Commenting human user |
+| `content` | TEXT | NOT NULL | Comment body |
+| `metadata` | JSONB DEFAULT `{}` | | |
+| `confidence_score` | FLOAT | | Agent self-assessment (migration 021) |
+| `created_at` | TIMESTAMPTZ | NOT NULL | |
+
+**Index:** `task_id`
+
+---
+
+### `team_task_events`
+
+Immutable audit log for task state changes. (migration 018)
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | UUID | PK | UUID v7 |
+| `task_id` | UUID FK → team_tasks | NOT NULL | Parent task |
+| `event_type` | VARCHAR(30) | NOT NULL | e.g. `status_change`, `assigned`, `locked` |
+| `actor_type` | VARCHAR(10) | NOT NULL | `agent` or `user` |
+| `actor_id` | VARCHAR(255) | NOT NULL | Acting entity ID |
+| `data` | JSONB | | Event payload |
+| `created_at` | TIMESTAMPTZ | NOT NULL | |
+
+**Index:** `task_id`
+
+---
+
+### `secure_cli_binaries`
+
+Credential injection configuration for the Exec tool (Direct Exec Mode). Admins map binary names to encrypted environment variables; GoClaw auto-injects them into child processes. (migration 020; updated migration 036)
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | UUID | PK | UUID v7 |
+| `binary_name` | TEXT | NOT NULL | Display name (e.g. `gh`, `gcloud`) |
+| `binary_path` | TEXT | | Absolute path; NULL = auto-resolved at runtime |
+| `description` | TEXT | NOT NULL DEFAULT `''` | Admin-facing description |
+| `encrypted_env` | BYTEA | NOT NULL | AES-256-GCM encrypted JSON env map |
+| `deny_args` | JSONB DEFAULT `[]` | | Regex patterns of forbidden argument prefixes |
+| `deny_verbose` | JSONB DEFAULT `[]` | | Verbose flag patterns to strip |
+| `timeout_seconds` | INT DEFAULT 30 | | Process timeout |
+| `tips` | TEXT DEFAULT `''` | | Hint injected into TOOLS.md context |
+| `is_global` | BOOLEAN | NOT NULL DEFAULT true | If true, available to all agents; if false, only agents with an explicit grant |
+| `enabled` | BOOLEAN DEFAULT true | | |
+| `created_by` | TEXT DEFAULT `''` | | Admin user who created this entry |
+| `adapter_name` | TEXT | NULL | Routes the binary to a typed `CredentialAdapter` at exec time; NULL = legacy passthrough (migration 073) |
+| `created_at` / `updated_at` | TIMESTAMPTZ | | |
+
+> **Migration 036 note:** The `agent_id` column was removed from this table. Per-agent access is now controlled via the `secure_cli_agent_grants` table. Binaries with `is_global = true` are accessible to all agents; binaries with `is_global = false` require an explicit grant.
+
+**Unique:** `(binary_name, tenant_id)` — one binary definition per name per tenant.
+
+**Indexes:** `binary_name`
+
+---
+
+### `api_keys`
+
+Fine-grained API key management with scope-based access control. (migration 020)
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | UUID | PK | |
+| `name` | VARCHAR(100) | NOT NULL | Human-readable key name |
+| `prefix` | VARCHAR(8) | NOT NULL | First 8 chars for display/search |
+| `key_hash` | VARCHAR(64) | NOT NULL UNIQUE | SHA-256 hex digest of the full key |
+| `scopes` | TEXT[] DEFAULT `{}` | | e.g. `{'operator.admin','operator.read'}` |
+| `expires_at` | TIMESTAMPTZ | | NULL = never expires |
+| `last_used_at` | TIMESTAMPTZ | | |
+| `revoked` | BOOLEAN DEFAULT false | | |
+| `created_by` | VARCHAR(255) | | User ID who created the key |
+| `created_at` / `updated_at` | TIMESTAMPTZ | | |
+
+**Indexes:** `key_hash` (partial `NOT revoked`), `prefix`
+
+---
+
+### `agent_heartbeats`
+
+Per-agent heartbeat configuration for periodic proactive check-ins. (migration 022)
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | UUID | PK | UUID v7 |
+| `agent_id` | UUID FK → agents | NOT NULL UNIQUE ON DELETE CASCADE | One config per agent |
+| `enabled` | BOOLEAN | NOT NULL DEFAULT false | Whether heartbeat is active |
+| `interval_sec` | INT | NOT NULL DEFAULT 1800 | Run interval in seconds |
+| `prompt` | TEXT | | Message sent to the agent each heartbeat |
+| `provider_id` | UUID FK → llm_providers (nullable) | ON DELETE SET NULL (migration 057) | Override LLM provider; set to NULL if provider is deleted |
+| `model` | VARCHAR(200) | | Override model |
+| `isolated_session` | BOOLEAN | NOT NULL DEFAULT true | Run in a dedicated session |
+| `light_context` | BOOLEAN | NOT NULL DEFAULT false | Inject minimal context |
+| `ack_max_chars` | INT | NOT NULL DEFAULT 300 | Max chars in acknowledgement response |
+| `max_retries` | INT | NOT NULL DEFAULT 2 | Max retry attempts on failure |
+| `active_hours_start` | VARCHAR(5) | | Start of active window (HH:MM) |
+| `active_hours_end` | VARCHAR(5) | | End of active window (HH:MM) |
+| `timezone` | TEXT | | Timezone for active hours |
+| `channel` | VARCHAR(50) | | Delivery channel |
+| `chat_id` | TEXT | | Delivery chat ID |
+| `next_run_at` | TIMESTAMPTZ | | Scheduled next execution |
+| `last_run_at` | TIMESTAMPTZ | | Last execution time |
+| `last_status` | VARCHAR(20) | | Last run status |
+| `last_error` | TEXT | | Last run error |
+| `run_count` | INT | NOT NULL DEFAULT 0 | Total runs |
+| `suppress_count` | INT | NOT NULL DEFAULT 0 | Total suppressed runs |
+| `metadata` | JSONB | DEFAULT `{}` | Extra metadata |
+| `created_at` / `updated_at` | TIMESTAMPTZ | DEFAULT NOW() | |
+
+**Indexes:** `idx_heartbeats_due` on `(next_run_at) WHERE enabled = true AND next_run_at IS NOT NULL` — partial index for efficient scheduler polling.
+
+---
+
+### `heartbeat_run_logs`
+
+Execution log for each heartbeat run. (migration 022)
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | UUID | PK | UUID v7 |
+| `heartbeat_id` | UUID FK → agent_heartbeats | NOT NULL ON DELETE CASCADE | Parent heartbeat config |
+| `agent_id` | UUID FK → agents | NOT NULL ON DELETE CASCADE | Owning agent |
+| `status` | VARCHAR(20) | NOT NULL | `ok`, `error`, `skipped` |
+| `summary` | TEXT | | Short run summary |
+| `error` | TEXT | | Error message if failed |
+| `duration_ms` | INT | | Run duration in milliseconds |
+| `input_tokens` | INT | DEFAULT 0 | |
+| `output_tokens` | INT | DEFAULT 0 | |
+| `skip_reason` | VARCHAR(50) | | Reason run was skipped |
+| `metadata` | JSONB | DEFAULT `{}` | Extra metadata |
+| `ran_at` | TIMESTAMPTZ | DEFAULT NOW() | |
+| `created_at` | TIMESTAMPTZ | DEFAULT NOW() | |
+
+**Indexes:** `idx_hb_logs_heartbeat` on `(heartbeat_id, ran_at DESC)`, `idx_hb_logs_agent` on `(agent_id, ran_at DESC)`
+
+---
+
+### `agent_config_permissions`
+
+Generic permission table for agent configuration (heartbeat, cron, file writers, etc.). Replaces `group_file_writers`. (migration 022)
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | UUID | PK | UUID v7 |
+| `agent_id` | UUID FK → agents | NOT NULL ON DELETE CASCADE | Owning agent |
+| `scope` | VARCHAR(255) | NOT NULL | Group/chat ID scope |
+| `config_type` | VARCHAR(50) | NOT NULL | e.g. `file_writer`, `heartbeat` |
+| `user_id` | VARCHAR(255) | NOT NULL | Grantee user ID |
+| `permission` | VARCHAR(10) | NOT NULL | `allow` or `deny` |
+| `granted_by` | VARCHAR(255) | | Who granted this permission |
+| `metadata` | JSONB | DEFAULT `{}` | Extra metadata (e.g. displayName, username) |
+| `created_at` / `updated_at` | TIMESTAMPTZ | DEFAULT NOW() | |
+
+**Unique:** `(agent_id, scope, config_type, user_id)`
+
+**Indexes:** `idx_acp_lookup` on `(agent_id, scope, config_type)`
+
+---
+
+### `system_configs`
+
+Centralized key-value store for per-tenant system settings. Falls back to master tenant at application layer. (migration 029)
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `key` | VARCHAR(100) | PK (composite) | Config key |
+| `value` | TEXT | NOT NULL | Config value (plain text, not encrypted) |
+| `tenant_id` | UUID FK → tenants | PK (composite), ON DELETE CASCADE | Owning tenant |
+| `updated_at` | TIMESTAMPTZ | DEFAULT NOW() | Last update time |
+
+**Primary Key:** `(key, tenant_id)`
+
+**Indexes:** `idx_system_configs_tenant` on `(tenant_id)`
+
+---
+
+## Migration History
+
+| Version | Description |
+|---------|-------------|
+| 1 | Initial schema — providers, agents, sessions, memory, skills, cron, pairing, traces, MCP, custom tools, channels, config_secrets, group_file_writers |
+| 2 | Agent links, agent frontmatter, FTS + embedding on agents, parent_trace_id on traces |
+| 3 | Agent teams, team tasks, team messages, team_id on agent_links |
+| 4 | Teams v2 refinements |
+| 5 | Phase 4 additions |
+| 6 | Builtin tools registry, metadata column on custom_tools |
+| 7 | Team metadata |
+| 8 | Team tasks user scope |
+| 9 | Quota index — partial index on traces for efficient per-user quota counting |
+| 10 | Agents markdown v2 |
+| 11 | `metadata JSONB` on sessions, user_agent_profiles, pairing_requests, paired_devices |
+| 12 | `channel_pending_messages` — group chat message buffer |
+| 13 | `kg_entities` and `kg_relations` — knowledge graph tables |
+| 14 | `channel_contacts` — global unified contact directory |
+| 15 | `budget_monthly_cents` on agents; `activity_logs` audit table |
+| 16 | `usage_snapshots` for hourly metrics; perf indexes on traces and spans |
+| 17 | `is_system`, `deps`, `enabled` on skills |
+| 18 | Team workspace files/versions/comments, task comments/events, task v2 columns (locking, progress, followup, identifier), `team_id` on handoff_routes |
+| 19 | `team_id` FK on memory_documents, memory_chunks, kg_entities, kg_relations, traces, spans, cron_jobs, cron_run_logs, sessions |
+| 20 | `secure_cli_binaries` and `api_keys` tables |
+| 21 | `expires_at` on paired_devices; `confidence_score` on team_tasks, team_messages, team_task_comments |
+| 22 | `agent_heartbeats` and `heartbeat_run_logs` tables for heartbeat monitoring; `agent_config_permissions` generic permission table |
+| 23 | Agent hard-delete support (cascade FK constraints, unique index on active agents); merges `group_file_writers` into `agent_config_permissions` |
+| 24 | Team attachments refactor — drops `team_workspace_files`, `team_workspace_file_versions`, `team_workspace_comments`, and `team_messages`; adds new path-based `team_task_attachments` table linked to tasks; adds `comment_count` and `attachment_count` denormalized columns on `team_tasks`; adds `embedding vector(1536)` on `team_tasks` for semantic task search |
+| 25 | Adds `embedding vector(1536)` column and HNSW index to `kg_entities` for pgvector-backed semantic entity search |
+| 26 | Adds `owner_id VARCHAR(255)` to `api_keys` — when set, authenticating via this key forces `user_id = owner_id` (user-bound API key); adds `team_user_grants` table for team-level access control; drops legacy `handoff_routes` and `delegation_history` tables |
+| 27 | Tenant foundation — creates `tenants` and `tenant_users` tables; seeds master tenant (`0193a5b0-7000-7000-8000-000000000001`); adds `tenant_id` column to 40+ tables for multi-tenant isolation; drops global unique constraints and replaces with per-tenant composite indexes; adds `builtin_tool_tenant_configs`, `skill_tenant_configs`, and `mcp_user_credentials` tables; drops `custom_tools` table (dead code); migrates remaining UUID v4 defaults to v7 |
+| 28 | Adds `comment_type VARCHAR(20) DEFAULT 'note'` to `team_task_comments` — supports `"blocker"` type that triggers task auto-fail and leader escalation |
+| 29 | `system_configs` — centralized per-tenant key-value configuration store; composite PK `(key, tenant_id)` with cascade delete |
+| 30 | Adds GIN indexes on `spans.metadata` (partial, `span_type = 'llm_call'`) and `sessions.metadata` JSONB columns for query performance |
+| 31 | Adds `tsv tsvector` generated column + GIN index to `kg_entities` for full-text search; creates `kg_dedup_candidates` table for entity deduplication review |
+| 32 | Creates `secure_cli_user_credentials` for per-user credential injection (mirrors `mcp_user_credentials` pattern); adds `contact_type VARCHAR(20) DEFAULT 'user'` to `channel_contacts` |
+| 33 | Promotes `stateless`, `deliver`, `deliver_channel`, `deliver_to`, `wake_heartbeat` from `payload` JSONB to dedicated columns on `cron_jobs` |
+| 34 | `subagent_tasks` — subagent task persistence for DB-backed task lifecycle tracking, cost attribution, and restart recovery |
+| 35 | `contact_thread_id` — adds `thread_id` and `thread_type` to `channel_contacts`; cleans `sender_id` format; rebuilds unique index to include thread scope |
+| 36 | `secure_cli_agent_grants` — restructures CLI credentials from per-binary agent assignment to a grants model; creates `secure_cli_agent_grants` table; adds `is_global` to `secure_cli_binaries`; removes `agent_id` column from `secure_cli_binaries` |
+| 37 | V3 memory evolution — creates `episodic_summaries`, `agent_evolution_metrics`, `agent_evolution_suggestions`; adds `valid_from`/`valid_until` temporal columns to `kg_entities`/`kg_relations`; promotes 12 agent config fields from `other_config` JSONB to dedicated `agents` columns (`emoji`, `agent_description`, `thinking_level`, `max_tokens`, `self_evolve`, `skill_evolve`, `skill_nudge_interval`, `reasoning_config`, `workspace_sharing`, `chatgpt_oauth_routing`, `shell_deny_groups`, `kg_dedup_config`) |
+| 38 | Knowledge Vault — creates `vault_documents`, `vault_links`, `vault_versions` tables; HNSW vector index and FTS on vault docs |
+| 39 | Clears stale `agent_links` data (`TRUNCATE agent_links`); `episodic_summaries` already created in 037 |
+| 40 | Adds `search_vector tsvector GENERATED` column + GIN index and optimised HNSW index to `episodic_summaries` for full-text and vector search |
+| 41 | Adds `promoted_at TIMESTAMPTZ` to `episodic_summaries` for the dreaming/long-term memory promotion pipeline |
+| 42 | Adds `summary TEXT` column to `vault_documents`; rebuilds `tsv` generated column to include summary for richer FTS |
+| 43 | Adds `team_id` and `custom_scope` to `vault_documents`; replaces old unique constraint with team-aware composite; adds `trg_vault_docs_team_null_scope` trigger; adds `custom_scope` to `vault_links`, `vault_versions`, `memory_documents`, `memory_chunks`, `team_tasks`, `team_task_attachments`, `team_task_comments`, `team_task_events`, `subagent_tasks` |
+| 44 | Seeds `AGENTS_CORE.md` and `AGENTS_TASK.md` context files for all existing agents that lack them; removes deprecated `AGENTS_MINIMAL.md` entries |
+| 45 | Adds `recall_count`, `recall_score`, `last_recalled_at` to `episodic_summaries`; partial index `idx_episodic_recall_unpromoted` on `(agent_id, user_id, recall_score DESC)` where `promoted_at IS NULL` |
+| 46 | Makes `vault_documents.agent_id` nullable for team-scoped and tenant-shared files; FK on delete changes from CASCADE to SET NULL; replaces unique index with tenant_id-leading + COALESCE; adds `trg_vault_docs_agent_null_scope_fix` trigger; partial index `idx_vault_docs_agent_scope` |
+| 47 | Adds unique constraint `uq_cron_jobs_agent_tenant_name` on `cron_jobs(agent_id, tenant_id, name)` after dedup; adds `path_basename` generated column and `idx_vault_docs_basename` index to `vault_documents` |
+| 48 | `vault_media_linking` — adds `base_name` generated column `lower(regexp_replace(file_path, '.+/', ''))` to `team_task_attachments` for basename-based vault linking; adds `metadata JSONB NOT NULL DEFAULT '{}'` to `vault_links` for enrichment pipeline metadata; fixes CASCADE FK constraints on vault-related tables |
+| 49 | `vault_path_prefix_index` — adds concurrent index `idx_vault_docs_path_prefix` on `vault_documents(path text_pattern_ops)` for fast `LIKE 'prefix%'` queries |
+| 50 | Seeds `stt` row into `builtin_tools` (Speech-to-Text via ElevenLabs Scribe or proxy); `ON CONFLICT DO NOTHING` preserves user-customized settings |
+| 51 | Backfills `mode: "cache-ttl"` into `agents.context_pruning` for agents that had custom context_pruning config without a `mode` field; does **not** change the global default — pruning remains opt-in |
+| 52 | Agent hooks system — creates `agent_hooks`, `hook_executions`, and `tenant_hook_budget` tables |
+| 53 | Extends `agent_hooks`: relaxes `handler_type` CHECK to add `'script'`; extends `source` CHECK to add `'builtin'`; drops per-scope uniqueness indexes (scripts routinely add many hooks per event) |
+| 54 | Adds `name VARCHAR(255)` column to `agent_hooks`; creates `agent_hook_agents` N:M junction table; migrates existing `agent_id` FK to junction; renames `agent_hooks` → `hooks` and `agent_hook_agents` → `hook_agents`; drops deprecated `agent_id` column from `hooks` |
+| 55 | Adds `vault_documents_scope_consistency` CHECK constraint (NOT VALID) on `vault_documents` enforcing scope/agent_id/team_id coherence: `personal` requires `agent_id NOT NULL`, `team` requires `team_id NOT NULL`, `shared` requires both NULL, `custom` is unconstrained |
+| 56 | `vault_chat_id` — adds `chat_id TEXT NULL` column to `vault_documents` and index `(tenant_id, chat_id, agent_id)` for chat-scoped vault isolation. Migration 056 follow-up (v3.11.2): drops scope-consistency check before backfill UPDATEs to prevent constraint errors on legacy data |
+| 57 | `heartbeat_provider_fk_set_null` (PG) — defensive orphan cleanup, drops existing FK by constraint-name lookup, re-adds as `agent_heartbeats_provider_id_fkey` with `ON DELETE SET NULL`. Brief `ACCESS EXCLUSIVE` lock on `agent_heartbeats` during ALTER (sub-second on small tables). SQLite: schema v25 → v26, full table rebuild for `agent_heartbeats` with updated FK clause; 25-column `INSERT … SELECT` preserves existing rows; `idx_heartbeats_due` recreated. |
+| 58 | `agent_grants_env_override` — adds `encrypted_env BYTEA` to `secure_cli_agent_grants`; NULL means inherit binary-level env. Mirrors the `secure_cli_user_credentials.encrypted_env` AES-256-GCM pattern for per-grant env injection. |
+| 59 | `webhooks` — creates `webhooks` (outbound HTTP webhook registry) and `webhook_calls` (delivery audit log with retry state) tables. Tenant-scoped. `webhooks.secret_hash` globally unique when not revoked. `webhook_calls.status` CHECK: `queued`, `running`, `done`, `failed`, `dead`. |
+| 60 | `webhook_calls_lease_token` — adds `lease_token TEXT` to `webhook_calls` for optimistic-concurrency CAS during worker claim/update; `ReclaimStale` sets it to NULL so in-flight CAS operations fail on next attempt. |
+| 61 | `webhooks_encrypted_secret` — adds `encrypted_secret TEXT NOT NULL DEFAULT ''` to `webhooks`; stores AES-256-GCM encrypted raw secret via `GOCLAW_ENCRYPTION_KEY`. HMAC signing uses the decrypted secret, not `secret_hash`. Existing webhooks get empty string and require rotation. |
+| 62 | `workstations` — creates `workstations` (SSH/Docker remote exec targets with encrypted `metadata` and `default_env`) and `agent_workstation_links` (agent↔workstation N:M junction with `is_default` flag) tables. |
+| 63 | `workstation_permissions` — creates `workstation_permissions` allowlist table; default-deny on argv[0] binary name; seeded inside `WorkstationStore.Create` transaction. Partial index on enabled entries. |
+| 64 | `workstation_activity` — creates `workstation_activity` rolling audit log for exec events (`exec`/`deny`); stores truncated command preview + SHA-256 hash; append-only, pruned nightly via `Prune(before)`. |
+| 65 | `agent_model_fallback` — adds `model_fallback JSONB NOT NULL DEFAULT '{}'` to `agents`; ordered array of fallback model identifiers tried when the primary model fails. |
+| 66 | `skill_agent_manage_grants` — adds `can_manage BOOLEAN NOT NULL DEFAULT FALSE` to `skill_agent_grants`; grants the agent permission to manage (publish, update, delete) the skill at tenant scope. |
+| 67 | `skill_agent_grants_scope_cleanup` — data-only migration; deletes `skill_agent_grants` rows where `tenant_id` mismatches agent or skill tenant, enforcing tenant-scope isolation on skill grants. No schema changes. |
+| 68 | `bitrix_portals` — Bitrix24 portal registry with encrypted OAuth credentials, seeded before the install flow. |
+| 69 | `browser_cookies` — encrypted per-agent browser cookie storage for browser automation. |
+| 70 | `usage_pricing_catalog` / `usage_pricing_overrides` — provider/model pricing catalog and per-tenant overrides. |
+| 71 | `usage_cap_policies` / `usage_cap_counters` / `usage_cap_reservations` / `usage_cap_events` — usage cap policy engine with counters, reservations, and a decision audit log. |
+| 72 | Agent budget ↔ usage-cap bridge — links per-agent budgets into the usage-cap policy engine. |
+| 73 | `secure_cli_credential_type` — adds `credential_type` / `host_scope` columns to secure-CLI credential tables. |
+| 74 | `run_timeline_items` — archived per-run ordered timeline for replaying runs; FK to traces/spans. |
+| 75 | Channel context capabilities — `mcp_context_grants` / `mcp_context_credentials` / `secure_cli_context_grants` / `secure_cli_context_credentials`; per-channel-instance scoped MCP and secure-CLI grants with encrypted credentials. |
+| 76 | Channel memory extraction — `channel_memory_extraction_runs` / `channel_memory_extraction_items`; passive scheduled extraction of durable memory (summaries only, no raw bodies) with a review queue. |
+| 77 | `secure_cli_agent_credentials` — per-agent typed CLI credentials separate from grants policy; composite FKs `(binary_id, tenant_id)` and `(agent_id, tenant_id)`. |
+| 78 | `skill_user_grants_tenant_unique` — replaces the `skill_user_grants` unique key with `(skill_id, user_id, tenant_id)` (tenant-scoped). |
+| 79 | Skill self-evolution — `skill_evolution_settings` / `skill_usage_metrics` / `skill_improvement_suggestions` / `skill_versions`; per-skill usage tracking and suggested/applied improvements (backfills one `skill_versions` row per existing skill). |
+| 80 | Usage event analytics — `usage_events` / `usage_event_rollups`; raw per-event analytics and pre-aggregated hourly rollups for the usage dashboard. |
+
+---
+
+### `kg_dedup_candidates`
+
+Stores candidate pairs of knowledge graph entities that may be duplicates, for human or automated review. (migration 031)
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | UUID | PK DEFAULT gen_random_uuid() | |
+| `tenant_id` | UUID FK → tenants | ON DELETE CASCADE | Owning tenant |
+| `agent_id` | UUID FK → agents | NOT NULL ON DELETE CASCADE | Owning agent |
+| `user_id` | VARCHAR(255) | NOT NULL DEFAULT `''` | User scope |
+| `entity_a_id` | UUID FK → kg_entities | NOT NULL ON DELETE CASCADE | First entity |
+| `entity_b_id` | UUID FK → kg_entities | NOT NULL ON DELETE CASCADE | Second entity |
+| `similarity` | FLOAT | NOT NULL | Similarity score (0–1) |
+| `status` | VARCHAR(20) | NOT NULL DEFAULT `pending` | `pending`, `merged`, `dismissed` |
+| `created_at` | TIMESTAMPTZ | NOT NULL DEFAULT NOW() | |
+
+**Unique:** `(entity_a_id, entity_b_id)`
+
+**Indexes:** `idx_kg_dedup_agent` on `(agent_id, status)`
+
+---
+
+### `secure_cli_user_credentials`
+
+Per-user credential overrides for secure CLI binaries. Mirrors the `mcp_user_credentials` pattern — user-specific env vars are injected instead of binary defaults. (migration 032)
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | UUID | PK DEFAULT gen_random_uuid() | |
+| `binary_id` | UUID FK → secure_cli_binaries | NOT NULL ON DELETE CASCADE | Parent binary config |
+| `user_id` | VARCHAR(255) | NOT NULL | User the credentials belong to |
+| `encrypted_env` | BYTEA | NOT NULL | AES-256-GCM encrypted JSON env map |
+| `metadata` | JSONB | NOT NULL DEFAULT `{}` | Extra metadata |
+| `tenant_id` | UUID FK → tenants | NOT NULL | Owning tenant |
+| `credential_type` | TEXT | NULL | Credential shape — `env`, `pat`, `ssh_key`, …; NULL = legacy passthrough (migration 073) |
+| `host_scope` | TEXT | NULL | Binds the credential to a specific hostname (e.g. `github.com`); NULL = unscoped (migration 073) |
+| `created_at` / `updated_at` | TIMESTAMPTZ | NOT NULL DEFAULT NOW() | |
+
+**Unique:** `(binary_id, user_id, tenant_id)`
+
+**Indexes:** `idx_scuc_tenant` on `(tenant_id)`, `idx_scuc_binary` on `(binary_id)`
+
+> Migration 032 also adds `contact_type VARCHAR(20) NOT NULL DEFAULT 'user'` to `channel_contacts` to distinguish user vs group contacts.
+
+---
+
+### `secure_cli_agent_grants`
+
+Per-agent access grants for secure CLI binaries. Separates "which agents can use a binary" from the binary credential definition. Each grant can override individual settings (deny_args, timeout, tips, etc.) — `NULL` fields inherit the binary default. (migration 036)
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | UUID | PK DEFAULT uuid_generate_v7() | UUID v7 |
+| `binary_id` | UUID FK → secure_cli_binaries | NOT NULL ON DELETE CASCADE | Parent binary config |
+| `agent_id` | UUID FK → agents | NOT NULL ON DELETE CASCADE | Agent being granted access |
+| `deny_args` | JSONB | NULL = use binary default | Per-agent override for forbidden argument patterns |
+| `deny_verbose` | JSONB | NULL = use binary default | Per-agent override for verbose flag patterns |
+| `timeout_seconds` | INTEGER | NULL = use binary default | Per-agent process timeout override |
+| `tips` | TEXT | NULL = use binary default | Per-agent hint injected into TOOLS.md context |
+| `enabled` | BOOLEAN | NOT NULL DEFAULT true | Whether this grant is active |
+| `encrypted_env` | BYTEA | | AES-256-GCM encrypted JSON env map override for this specific grant; NULL = use binary-level env (migration 058) |
+| `tenant_id` | UUID FK → tenants | NOT NULL | Owning tenant |
+| `created_at` / `updated_at` | TIMESTAMPTZ | NOT NULL DEFAULT now() | |
+
+**Unique:** `(binary_id, agent_id, tenant_id)` — one grant per agent per binary per tenant.
+
+**Indexes:** `idx_scag_binary` on `(binary_id)`, `idx_scag_agent` on `(agent_id)`, `idx_scag_tenant` on `(tenant_id)`
+
+---
+
+### `episodic_summaries`
+
+Tier 2 memory: compressed session summaries stored per agent/user, searchable via full-text and vector similarity. (migration 037; columns `search_vector`, `promoted_at` added in migrations 040–041)
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | UUID | PK DEFAULT gen_random_uuid() | |
+| `tenant_id` | UUID FK → tenants | NOT NULL | Owning tenant |
+| `agent_id` | UUID FK → agents | NOT NULL ON DELETE CASCADE | Owning agent |
+| `user_id` | VARCHAR(255) | NOT NULL DEFAULT `''` | User scope |
+| `session_key` | TEXT | NOT NULL | Source session key |
+| `summary` | TEXT | NOT NULL | Compressed session summary |
+| `l0_abstract` | TEXT | NOT NULL DEFAULT `''` | One-line abstract |
+| `key_topics` | TEXT[] | DEFAULT `{}` | Extracted topic labels |
+| `embedding` | vector(1536) | | Semantic embedding of summary |
+| `source_type` | TEXT | NOT NULL DEFAULT `session` | Source kind (`session`, etc.) |
+| `source_id` | TEXT | | Source identifier (for dedup) |
+| `turn_count` | INT | NOT NULL DEFAULT 0 | Turns in summarised session |
+| `token_count` | INT | NOT NULL DEFAULT 0 | Tokens in summarised session |
+| `search_vector` | tsvector GENERATED | STORED | FTS on `summary + key_topics` (migration 040) |
+| `promoted_at` | TIMESTAMPTZ | | NULL = not yet promoted to long-term memory (migration 041) |
+| `recall_count` | INT | NOT NULL DEFAULT 0 | Number of times this episode was recalled (migration 045) |
+| `recall_score` | DOUBLE PRECISION | NOT NULL DEFAULT 0 | Running-average of search hit scores (migration 045) |
+| `last_recalled_at` | TIMESTAMPTZ | | Timestamp of last recall (migration 045) |
+| `created_at` | TIMESTAMPTZ | NOT NULL DEFAULT NOW() | |
+| `expires_at` | TIMESTAMPTZ | | Optional TTL |
+
+**Indexes:** `(agent_id, user_id)`, `tenant_id`, unique `(agent_id, user_id, source_id) WHERE source_id IS NOT NULL`, GIN on `search_vector`, HNSW cosine on `embedding WHERE embedding IS NOT NULL`, `expires_at` (partial), `(agent_id, user_id, created_at) WHERE promoted_at IS NULL` (for dreaming pipeline), `idx_episodic_recall_unpromoted` on `(agent_id, user_id, recall_score DESC) WHERE promoted_at IS NULL` (migration 045 — DreamingWorker prioritizes high-scoring unpromoted episodes)
+
+---
+
+### `agent_evolution_metrics`
+
+Stage 1 self-evolution: raw metric observations per session collected by the evolution pipeline. (migration 037)
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | UUID | PK DEFAULT gen_random_uuid() | |
+| `tenant_id` | UUID FK → tenants | NOT NULL | |
+| `agent_id` | UUID FK → agents | NOT NULL ON DELETE CASCADE | |
+| `session_key` | TEXT | NOT NULL | Source session |
+| `metric_type` | TEXT | NOT NULL | Metric category |
+| `metric_key` | TEXT | NOT NULL | Specific metric name |
+| `value` | JSONB | NOT NULL | Metric value |
+| `created_at` | TIMESTAMPTZ | NOT NULL DEFAULT NOW() | |
+
+**Indexes:** `(agent_id, metric_type)`, `created_at`, `tenant_id`
+
+---
+
+### `agent_evolution_suggestions`
+
+Stage 2 self-evolution: proposed behavioural changes derived from metrics, pending review. (migration 037)
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | UUID | PK DEFAULT gen_random_uuid() | |
+| `tenant_id` | UUID FK → tenants | NOT NULL | |
+| `agent_id` | UUID FK → agents | NOT NULL ON DELETE CASCADE | |
+| `suggestion_type` | TEXT | NOT NULL | e.g. `prompt_tweak`, `tool_config` |
+| `suggestion` | TEXT | NOT NULL | The proposed change |
+| `rationale` | TEXT | NOT NULL | Why this change is suggested |
+| `parameters` | JSONB | | Optional structured parameters |
+| `status` | TEXT | NOT NULL DEFAULT `pending` | `pending`, `approved`, `rejected` |
+| `reviewed_by` | TEXT | | Reviewer ID |
+| `reviewed_at` | TIMESTAMPTZ | | Review timestamp |
+| `created_at` | TIMESTAMPTZ | NOT NULL DEFAULT NOW() | |
+
+**Indexes:** `(agent_id, status)`, `tenant_id`
+
+> **Migration 037 also alters:** `kg_entities` and `kg_relations` gain `valid_from TIMESTAMPTZ` and `valid_until TIMESTAMPTZ` for temporal validity windows. Current-entity indexes filter `WHERE valid_until IS NULL`.
+>
+> **Migration 037 also promotes** 12 agent config fields from `other_config` JSONB to dedicated `agents` columns: `emoji`, `agent_description`, `thinking_level`, `max_tokens`, `self_evolve`, `skill_evolve`, `skill_nudge_interval`, `reasoning_config`, `workspace_sharing`, `chatgpt_oauth_routing`, `shell_deny_groups`, `kg_dedup_config`.
+
+---
+
+### `vault_documents`
+
+Knowledge Vault document registry. Filesystem holds content; the database holds path, hash, embedding, and links. (migration 038; `summary` column added migration 042; `team_id`, `custom_scope` added migration 043; `chat_id` added migration 056)
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | UUID | PK DEFAULT gen_random_uuid() | |
+| `tenant_id` | UUID FK → tenants | NOT NULL ON DELETE CASCADE | |
+| `agent_id` | UUID FK → agents | NULL ON DELETE SET NULL | Owning agent; NULL for team-scoped or tenant-shared files (migration 046) |
+| `scope` | TEXT | NOT NULL DEFAULT `personal` | `personal`, `team`, or custom |
+| `path` | TEXT | NOT NULL | Logical file path within vault |
+| `title` | TEXT | NOT NULL DEFAULT `''` | Document title |
+| `doc_type` | TEXT | NOT NULL DEFAULT `note` | e.g. `note`, `reference`, `log` |
+| `content_hash` | TEXT | NOT NULL DEFAULT `''` | SHA-256 of file content |
+| `embedding` | vector(1536) | | Semantic embedding of summary |
+| `summary` | TEXT | NOT NULL DEFAULT `''` | LLM-generated summary (migration 042) |
+| `metadata` | JSONB | DEFAULT `{}` | Extra metadata |
+| `team_id` | UUID FK → agent_teams (nullable) | ON DELETE SET NULL | Team scope; NULL = personal (migration 043) |
+| `custom_scope` | VARCHAR(255) | | Future extensibility (migration 043) |
+| `chat_id` | TEXT | NULL | Isolated-team chat scoping — scopes a vault document to a specific chat; NULL = no chat scope (migration 056) |
+| `path_basename` | TEXT GENERATED ALWAYS | | `lower(regexp_replace(path, '.+/', ''))` — fast basename lookup (migration 047) |
+| `tsv` | tsvector GENERATED | STORED | FTS on `title + path + summary` (rebuilt migration 042) |
+| `created_at` / `updated_at` | TIMESTAMPTZ | DEFAULT NOW() | |
+
+**Unique:** `(tenant_id, COALESCE(agent_id, '00000000-0000-0000-0000-000000000000'), COALESCE(team_id, '00000000-0000-0000-0000-000000000000'), scope, path)` (migration 046 replaced migration 043's unique to support nullable `agent_id`)
+
+**Indexes:** `tenant_id`, `(agent_id, scope)`, `(agent_id, doc_type)`, `content_hash`, HNSW cosine on `embedding` (m=16, ef=64), GIN on `tsv`, `team_id` (partial non-null), `idx_vault_docs_agent_scope` on `(agent_id, scope) WHERE agent_id IS NOT NULL` (migration 046), `idx_vault_docs_basename` on `(tenant_id, path_basename)` (migration 047), `idx_vault_docs_path_prefix` on `(path text_pattern_ops)` (migration 049 — fast `LIKE 'prefix%'` queries), `(tenant_id, chat_id, agent_id)` (migration 056)
+
+> **Triggers:**
+> - `trg_vault_docs_team_null_scope` — when `team_id` is set to NULL (team deleted), `scope` is automatically reset to `'personal'` to prevent orphaned team-scope docs.
+> - `trg_vault_docs_agent_null_scope_fix` — when `agent_id` is set to NULL (agent deleted) and no team is set, `scope` is reset to `'shared'` (migration 046).
+
+> **Constraint (migration 055):** `vault_documents_scope_consistency` CHECK (NOT VALID) enforces scope/ownership coherence:
+> ```sql
+> CHECK (
+>     (scope = 'personal' AND agent_id IS NOT NULL AND team_id IS NULL) OR
+>     (scope = 'team'     AND team_id  IS NOT NULL AND agent_id IS NULL) OR
+>     (scope = 'shared'   AND agent_id IS NULL     AND team_id  IS NULL) OR
+>     scope = 'custom'
+> ) NOT VALID
+> ```
+> Added as `NOT VALID` to avoid locking the table during the upgrade. Run `ALTER TABLE vault_documents VALIDATE CONSTRAINT vault_documents_scope_consistency;` after auditing any legacy rows.
+
+---
+
+### `vault_links`
+
+Bidirectional wikilink-style connections between vault documents. (migration 038; `custom_scope` added migration 043; `metadata` added migration 048)
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | UUID | PK DEFAULT gen_random_uuid() | |
+| `from_doc_id` | UUID FK → vault_documents | NOT NULL ON DELETE CASCADE | Source document |
+| `to_doc_id` | UUID FK → vault_documents | NOT NULL ON DELETE CASCADE | Target document |
+| `link_type` | TEXT | NOT NULL DEFAULT `wikilink` | `wikilink`, `reference`, `depends_on`, `extends`, `related`, `supersedes`, `contradicts`, `task_attachment`, `delegation_attachment` |
+| `context` | TEXT | NOT NULL DEFAULT `''` | Surrounding text context |
+| `custom_scope` | VARCHAR(255) | | Future extensibility (migration 043) |
+| `metadata` | JSONB | NOT NULL DEFAULT `{}` | Enrichment pipeline metadata (migration 048) |
+| `created_at` | TIMESTAMPTZ | DEFAULT NOW() | |
+
+**Unique:** `(from_doc_id, to_doc_id, link_type)`
+
+**Indexes:** `from_doc_id`, `to_doc_id`
+
+---
+
+### `vault_versions`
+
+Document version history — schema created in migration 038 for v3.1 (empty placeholder). (migration 038; `custom_scope` added migration 043)
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | UUID PK | |
+| `doc_id` | UUID FK → vault_documents ON DELETE CASCADE | |
+| `version` | INT DEFAULT 1 | Version number |
+| `content` | TEXT DEFAULT `''` | Snapshot content |
+| `changed_by` | TEXT DEFAULT `''` | Actor who made the change |
+| `custom_scope` | VARCHAR(255) | Future extensibility (migration 043) |
+| `created_at` | TIMESTAMPTZ | |
+
+**Unique:** `(doc_id, version)`
+
+---
+
+### `subagent_tasks`
+
+Persists subagent task lifecycle for audit trail, cost attribution, and restart recovery. (migration 034; `custom_scope` added migration 043)
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | UUID | PK | UUID v7 |
+| `tenant_id` | UUID FK → tenants | NOT NULL ON DELETE CASCADE | Owning tenant |
+| `parent_agent_key` | VARCHAR(255) | NOT NULL | Agent key that spawned this task |
+| `session_key` | VARCHAR(500) | | Session the task belongs to |
+| `subject` | VARCHAR(255) | NOT NULL | Short task title |
+| `description` | TEXT | NOT NULL | Full task description |
+| `status` | VARCHAR(20) | NOT NULL DEFAULT `running` | `running`, `completed`, `failed`, `cancelled` |
+| `result` | TEXT | | Task result text |
+| `depth` | INT | NOT NULL DEFAULT 1 | Nesting depth from root agent |
+| `model` | VARCHAR(255) | | LLM model used |
+| `provider` | VARCHAR(255) | | LLM provider used |
+| `iterations` | INT | NOT NULL DEFAULT 0 | Tool loop iterations consumed |
+| `input_tokens` | BIGINT | NOT NULL DEFAULT 0 | Input token count |
+| `output_tokens` | BIGINT | NOT NULL DEFAULT 0 | Output token count |
+| `origin_channel` | VARCHAR(50) | | Channel that triggered the root task |
+| `origin_chat_id` | VARCHAR(255) | | Chat ID of the originating message |
+| `origin_peer_kind` | VARCHAR(20) | | Peer kind (`user`, `group`, etc.) |
+| `origin_user_id` | VARCHAR(255) | | User who triggered the root task |
+| `spawned_by` | UUID | | ID of parent `subagent_tasks` row (self-referential) |
+| `completed_at` | TIMESTAMPTZ | | When the task finished |
+| `archived_at` | TIMESTAMPTZ | | When the task was archived |
+| `metadata` | JSONB | NOT NULL DEFAULT `{}` | Extra metadata |
+| `created_at` / `updated_at` | TIMESTAMPTZ | NOT NULL DEFAULT NOW() | |
+
+**Indexes:**
+- `idx_subagent_tasks_parent_status` on `(tenant_id, parent_agent_key, status)` — primary roster lookup
+- `idx_subagent_tasks_session` on `(session_key)` WHERE `session_key IS NOT NULL` — session-scoped lookup
+- `idx_subagent_tasks_created` on `(tenant_id, created_at DESC)` — time-based audit and cleanup
+- `idx_subagent_tasks_metadata_gin` GIN on `(metadata)` — flexible metadata queries
+- `idx_subagent_tasks_archive` on `(status, completed_at)` WHERE `status IN ('completed', 'failed', 'cancelled') AND archived_at IS NULL` — archival candidates
+
+---
+
+---
+
+### `hooks` (formerly `agent_hooks`)
+
+Event-driven hook definitions. Global-scope hooks use `MasterTenantID` as `tenant_id`. Renamed from `agent_hooks` in migration 054. (migrations 052–054)
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | UUID | PK DEFAULT gen_random_uuid() | |
+| `tenant_id` | UUID | NOT NULL DEFAULT MasterTenantID | Owning tenant; master UUID for global-scope hooks |
+| `scope` | VARCHAR(8) | NOT NULL CHECK (`global`, `tenant`, `agent`) | Hook scope |
+| `event` | VARCHAR(32) | NOT NULL | Event name (e.g. `before_tool`, `after_tool`) |
+| `handler_type` | VARCHAR(16) | NOT NULL CHECK (`command`, `http`, `prompt`, `script`) | Handler kind (migration 053 added `script`) |
+| `config` | JSONB | NOT NULL DEFAULT `{}` | Handler-specific options (command path, HTTP URL, prompt template) |
+| `script` | TEXT | | Inline script source for `script` handler type (migration 053) |
+| `builtin` | TEXT | | Builtin handler identifier for `source = 'builtin'` hooks (migration 053) |
+| `name` | VARCHAR(255) | | User-facing label (migration 054) |
+| `matcher` | VARCHAR(256) | | Optional regex applied to `tool_name` before the hook fires |
+| `if_expr` | TEXT | | Optional CEL expression evaluated against `tool_input` |
+| `timeout_ms` | INT | NOT NULL DEFAULT 5000 | Hook execution timeout |
+| `on_timeout` | VARCHAR(8) | NOT NULL DEFAULT `block` CHECK (`block`, `allow`) | Behavior on timeout |
+| `priority` | INT | NOT NULL DEFAULT 0 | Higher value = evaluated first |
+| `enabled` | BOOL | NOT NULL DEFAULT true | |
+| `version` | INT | NOT NULL DEFAULT 1 | Optimistic-lock version counter |
+| `source` | VARCHAR(16) | NOT NULL DEFAULT `ui` CHECK (`ui`, `api`, `seed`, `builtin`) | Origin of hook (migration 053 added `builtin`) |
+| `metadata` | JSONB | NOT NULL DEFAULT `{}` | UI-only fields (tags, notes, lastTestedAt, createdByUsername) |
+| `created_by` | UUID | | Creator user ID |
+| `created_at` / `updated_at` | TIMESTAMPTZ | NOT NULL DEFAULT NOW() | |
+
+**Indexes:** `idx_hooks_lookup` on `(tenant_id, event) WHERE enabled = TRUE` (hot-path for ResolveForEvent)
+
+> **Migration 054 note:** The `agent_id` column was removed. Per-hook agent assignment is now controlled via the `hook_agents` junction table. The table was also renamed from `agent_hooks` to `hooks` in this migration. Per-scope uniqueness indexes (`uq_hooks_global`, `uq_hooks_tenant`, `uq_hooks_agent`) were dropped in migration 053.
+
+---
+
+### `hook_agents`
+
+N:M junction table linking hooks to agents. Replaces the 1:N `agent_id` FK on `hooks`. Created and populated in migration 054.
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `hook_id` | UUID FK → hooks | NOT NULL ON DELETE CASCADE | |
+| `agent_id` | UUID FK → agents | NOT NULL ON DELETE CASCADE | |
+
+**Primary Key:** `(hook_id, agent_id)`
+
+**Index:** `idx_hook_agents_agent` on `(agent_id)`
+
+---
+
+### `hook_executions`
+
+Append-only audit log for hook executions. `hook_id` is SET NULL when the parent hook is deleted to preserve the audit trail. (migration 052)
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | UUID | PK DEFAULT gen_random_uuid() | |
+| `hook_id` | UUID FK → hooks | ON DELETE SET NULL | Parent hook; NULL if hook was deleted |
+| `session_id` | VARCHAR(500) | | Originating session |
+| `event` | VARCHAR(32) | NOT NULL | Event that triggered the hook |
+| `input_hash` | CHAR(64) | | SHA-256 of canonical (tool_name + sorted args) |
+| `decision` | VARCHAR(16) | NOT NULL CHECK (`allow`, `block`, `error`, `timeout`) | Hook outcome |
+| `duration_ms` | INT | NOT NULL DEFAULT 0 | Execution duration |
+| `retry` | INT | NOT NULL DEFAULT 0 | Retry attempt number |
+| `dedup_key` | VARCHAR(128) | | Prevents duplicate rows for (hook_id, event_id) |
+| `error` | VARCHAR(256) | | Error message (truncated to 256 chars) |
+| `error_detail` | BYTEA | | Full error AES-256-GCM encrypted (GDPR-purgeable) |
+| `metadata` | JSONB | NOT NULL DEFAULT `{}` | Extensible exec context (matcher_matched, cel_eval_result, stdout_len, http_status, prompt_model, prompt_tokens, trace_id) |
+| `created_at` | TIMESTAMPTZ | NOT NULL DEFAULT NOW() | |
+
+**Indexes:** `idx_hook_executions_session` on `(session_id, created_at)`, unique `uq_hook_executions_dedup` on `(dedup_key) WHERE dedup_key IS NOT NULL`
+
+---
+
+### `tenant_hook_budget`
+
+Per-tenant monthly prompt-handler token/cost budget. One row per tenant tracks monthly spend against a cap. (migration 052)
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `tenant_id` | UUID | PK | Owning tenant |
+| `month_start` | DATE | NOT NULL | First day of the tracked month |
+| `budget_total` | BIGINT | NOT NULL DEFAULT 0 | Monthly cap (provider-defined units) |
+| `remaining` | BIGINT | NOT NULL DEFAULT 0 | Units remaining; decremented atomically |
+| `last_warned_at` | TIMESTAMPTZ | | Timestamp of last threshold warning |
+| `metadata` | JSONB | NOT NULL DEFAULT `{}` | Alert thresholds, override flags, notes |
+| `updated_at` | TIMESTAMPTZ | NOT NULL DEFAULT NOW() | |
+
+---
+
+---
+
+### `webhooks`
+
+Outbound HTTP webhook registry. Each webhook defines an endpoint that GoClaw calls when an agent produces an LLM response or a channel message. Secrets are encrypted at rest with AES-256-GCM via `GOCLAW_ENCRYPTION_KEY`. (migrations 059, 061)
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | UUID | PK DEFAULT gen_random_uuid() | |
+| `tenant_id` | UUID | NOT NULL | Owning tenant; all queries filter by tenant |
+| `agent_id` | UUID FK → agents | ON DELETE SET NULL | Bound agent; NULL = tenant-wide webhook |
+| `name` | TEXT | NOT NULL | Human-readable label |
+| `kind` | TEXT | NOT NULL CHECK (`llm`, `message`) | Trigger kind |
+| `secret_prefix` | TEXT | | First chars of raw secret for display |
+| `secret_hash` | TEXT | NOT NULL | SHA-256 hex of raw secret; used for bearer-token lookup |
+| `encrypted_secret` | TEXT | NOT NULL DEFAULT `''` | AES-256-GCM encrypted raw secret via `GOCLAW_ENCRYPTION_KEY`; used for HMAC signing (migration 061) |
+| `scopes` | TEXT[] | NOT NULL DEFAULT `{}` | Permitted operation scopes |
+| `channel_id` | UUID | | Bound channel instance for `message` kind |
+| `rate_limit_per_min` | INT | NOT NULL DEFAULT 60 | Per-webhook inbound rate cap |
+| `ip_allowlist` | TEXT[] | NOT NULL DEFAULT `{}` | Allowed caller IPs; empty = allow all |
+| `require_hmac` | BOOLEAN | NOT NULL DEFAULT false | Reject requests without valid HMAC signature |
+| `localhost_only` | BOOLEAN | NOT NULL DEFAULT false | Restrict to loopback callers |
+| `revoked` | BOOLEAN | NOT NULL DEFAULT false | Soft-disable without delete |
+| `created_by` | TEXT | | Creator user ID |
+| `created_at` | TIMESTAMPTZ | NOT NULL DEFAULT NOW() | |
+| `updated_at` | TIMESTAMPTZ | NOT NULL DEFAULT NOW() | |
+| `last_used_at` | TIMESTAMPTZ | | Last successful inbound call |
+
+**Indexes:** `idx_webhooks_tenant` on `(tenant_id)`, `idx_webhooks_tenant_agent` on `(tenant_id, agent_id)`, unique `uq_webhooks_secret` on `(secret_hash) WHERE revoked = false`
+
+---
+
+### `webhook_calls`
+
+Delivery log for webhook invocations with retry state and optimistic-concurrency locking. Append-only in practice. (migrations 059, 060)
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | UUID | PK DEFAULT gen_random_uuid() | |
+| `tenant_id` | UUID | NOT NULL | Owning tenant |
+| `webhook_id` | UUID FK → webhooks | NOT NULL ON DELETE CASCADE | Parent webhook |
+| `agent_id` | UUID | | Agent that handled the call |
+| `idempotency_key` | TEXT | | Caller-supplied dedup key |
+| `mode` | TEXT | NOT NULL CHECK (`sync`, `async`) | Delivery mode |
+| `callback_url` | TEXT | | Async result delivery URL |
+| `status` | TEXT | NOT NULL DEFAULT `queued` CHECK (`queued`, `running`, `done`, `failed`, `dead`) | Delivery status |
+| `attempts` | INT | NOT NULL DEFAULT 0 | Retry count |
+| `delivery_id` | UUID | NOT NULL DEFAULT gen_random_uuid() | Unique delivery identifier |
+| `lease_token` | TEXT | | Optimistic-concurrency CAS token; set by ClaimNext, cleared on stale reclaim (migration 060) |
+| `next_attempt_at` | TIMESTAMPTZ | | Scheduled retry time |
+| `started_at` | TIMESTAMPTZ | | When processing began |
+| `request_payload` | JSONB | | Inbound request body |
+| `response` | JSONB | | Agent response body |
+| `last_error` | TEXT | | Last delivery error |
+| `created_at` | TIMESTAMPTZ | NOT NULL DEFAULT NOW() | |
+| `completed_at` | TIMESTAMPTZ | | When delivery finished |
+
+**Indexes:** `idx_webhook_calls_tenant_created` on `(tenant_id, created_at DESC)`, `idx_webhook_calls_status_attempt` on `(status, next_attempt_at)`, unique `uq_webhook_calls_idempotency` on `(webhook_id, idempotency_key) WHERE idempotency_key IS NOT NULL`
+
+---
+
+### `workstations`
+
+SSH or Docker remote execution targets. Each workstation defines a backend connection; agents use it via the `workstation_exec` tool. Credentials stored encrypted. (migration 062)
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | UUID | PK | |
+| `workstation_key` | VARCHAR(100) | NOT NULL | Slug identifier |
+| `tenant_id` | UUID FK → tenants | NOT NULL ON DELETE CASCADE | Owning tenant |
+| `name` | VARCHAR(255) | NOT NULL | Display name |
+| `backend_type` | VARCHAR(20) | NOT NULL CHECK (`ssh`, `docker`) | Backend kind |
+| `metadata` | BYTEA | NOT NULL | AES-256-GCM encrypted connection metadata (host, port, credentials) |
+| `default_cwd` | VARCHAR(500) | NOT NULL DEFAULT `''` | Default working directory |
+| `default_env` | BYTEA | NOT NULL | AES-256-GCM encrypted default environment variables |
+| `active` | BOOLEAN | NOT NULL DEFAULT TRUE | Whether workstation is available |
+| `created_at` | TIMESTAMPTZ | NOT NULL DEFAULT NOW() | |
+| `updated_at` | TIMESTAMPTZ | NOT NULL DEFAULT NOW() | |
+| `created_by` | VARCHAR(255) | NOT NULL DEFAULT `''` | Creator user ID |
+
+**Unique:** `(tenant_id, workstation_key)`
+
+**Indexes:** `idx_workstations_tenant_active` on `(tenant_id, active) WHERE active = TRUE`
+
+> Migration 062 also creates **`agent_workstation_links`** — many-to-many junction linking agents to workstations within a tenant. PK: `(agent_id, workstation_id)`. `is_default BOOLEAN` marks the agent's preferred workstation. Unique partial index: `(agent_id) WHERE is_default = TRUE`.
+
+---
+
+### `workstation_permissions`
+
+Per-workstation allowlist of permitted binary names (argv[0]). Default-deny: if no enabled pattern matches, the exec is rejected. Patterns support glob-style prefix matching (e.g., `python*`). (migration 063)
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | UUID | PK | |
+| `workstation_id` | UUID FK → workstations | NOT NULL ON DELETE CASCADE | Parent workstation |
+| `tenant_id` | UUID FK → tenants | NOT NULL ON DELETE CASCADE | Owning tenant |
+| `pattern` | VARCHAR(500) | NOT NULL | Binary name or glob pattern matched against argv[0] |
+| `enabled` | BOOLEAN | NOT NULL DEFAULT TRUE | Whether this allowlist entry is active |
+| `created_by` | VARCHAR(255) | NOT NULL DEFAULT `''` | Creator user ID |
+| `created_at` | TIMESTAMPTZ | NOT NULL DEFAULT NOW() | |
+
+**Unique:** `(workstation_id, pattern)`
+
+**Indexes:** `idx_workstation_perms_ws` on `(workstation_id) WHERE enabled = TRUE`, `idx_workstation_perms_tenant` on `(tenant_id)`
+
+---
+
+### `workstation_activity`
+
+Rolling audit log for workstation exec events (`exec` and `deny`). Append-only; pruned nightly. Stores a truncated command preview (first 200 chars) and SHA-256 hash for forensics. (migration 064)
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | UUID | PK | |
+| `tenant_id` | UUID FK → tenants | NOT NULL ON DELETE CASCADE | Owning tenant |
+| `workstation_id` | UUID FK → workstations | NOT NULL ON DELETE CASCADE | Target workstation |
+| `agent_id` | VARCHAR(255) | NOT NULL DEFAULT `''` | Agent that triggered the exec |
+| `action` | VARCHAR(20) | NOT NULL | `exec` (allowed) or `deny` (blocked) |
+| `cmd_hash` | VARCHAR(64) | NOT NULL DEFAULT `''` | SHA-256 of full command for forensic correlation |
+| `cmd_preview` | VARCHAR(200) | NOT NULL DEFAULT `''` | First 200 chars of command (secrets redacted) |
+| `exit_code` | INTEGER | | Process exit code; NULL for denied execs |
+| `duration_ms` | INTEGER | | Execution duration in milliseconds |
+| `deny_reason` | VARCHAR(200) | NOT NULL DEFAULT `''` | Reason exec was blocked (empty for allowed execs) |
+| `created_at` | TIMESTAMPTZ | NOT NULL DEFAULT NOW() | |
+
+**Indexes:** `idx_ws_activity_ws_time` on `(workstation_id, created_at DESC)`, `idx_ws_activity_tenant_time` on `(tenant_id, created_at DESC)`, `idx_ws_activity_retention` on `(created_at)` (used by nightly pruner)
+
+---
+
+### `bitrix_portals`
+
+Per-tenant Bitrix24 portal OAuth state. Multiple Bitrix24 channel instances (chatbots) can share one portal row via a portal reference in their channel config. (migration 068)
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | UUID | PK DEFAULT gen_random_uuid() | |
+| `tenant_id` | UUID FK → tenants | NOT NULL ON DELETE CASCADE | Owning tenant |
+| `name` | VARCHAR(100) | NOT NULL | Portal display name (one per tenant) |
+| `domain` | VARCHAR(255) | NOT NULL | Bitrix24 portal domain |
+| `credentials` | BYTEA | | AES-256-GCM ciphertext of `{client_id, client_secret}` |
+| `state` | BYTEA | | AES-256-GCM ciphertext of portal state (access/refresh tokens, `member_id`, `app_token`, registered bots, media folders) |
+| `created_at` / `updated_at` | TIMESTAMPTZ | NOT NULL DEFAULT NOW() | |
+
+**Indexes:** unique `(tenant_id, name)`; unique `LOWER(TRIM(domain))` (incoming install/event callbacks resolve by domain before tenant scope is known)
+
+---
+
+### `browser_cookies`
+
+User-selected cookies for server-side browser contexts. Values are AES-256-GCM ciphertext; cookies are scoped by tenant, user, and agent to prevent cross-principal reuse. (migration 069)
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | UUID | PK DEFAULT gen_random_uuid() | |
+| `tenant_id` | UUID FK → tenants | NOT NULL ON DELETE CASCADE | Owning tenant |
+| `user_id` | VARCHAR(255) | NOT NULL | Owning user |
+| `agent_id` | VARCHAR(255) | NOT NULL | Owning agent |
+| `domain` | TEXT | NOT NULL (non-empty) | Cookie domain |
+| `name` | TEXT | NOT NULL (non-empty) | Cookie name |
+| `path` | TEXT | NOT NULL DEFAULT `/` (non-empty) | Cookie path |
+| `encrypted_value` | TEXT | NOT NULL | AES-256-GCM encrypted cookie value |
+| `secure` | BOOLEAN | NOT NULL DEFAULT FALSE | `Secure` flag |
+| `http_only` | BOOLEAN | NOT NULL DEFAULT FALSE | `HttpOnly` flag |
+| `same_site` | VARCHAR(32) | NOT NULL DEFAULT `''` | `SameSite` attribute |
+| `expires_at` | TIMESTAMPTZ | | Cookie expiry; NULL = session cookie |
+| `source` | VARCHAR(64) | NOT NULL DEFAULT `''` | Where the cookie was captured from |
+| `created_at` / `updated_at` | TIMESTAMPTZ | NOT NULL DEFAULT NOW() | |
+
+**Indexes:** unique `(tenant_id, user_id, agent_id, domain, path, name)`; `(tenant_id, user_id, agent_id, domain)`; `expires_at`
+
+---
+
+### `usage_pricing_catalog`
+
+Synced per-model pricing reference used to cost token usage. One row per `model_id`. (migration 070)
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | UUID | PK DEFAULT gen_random_uuid() | |
+| `model_id` | TEXT | NOT NULL UNIQUE | Model identifier |
+| `canonical_model_id` | TEXT | | Canonical model alias |
+| `raw_pricing` / `raw_model` | JSONB | NOT NULL DEFAULT `{}` | Raw upstream pricing/model payload |
+| `input_price`, `output_price`, `cache_read_price`, `cache_write_price`, `reasoning_price`, `request_price`, `image_price`, `web_search_price` | NUMERIC(30,18) | `>= 0` or NULL | Per-unit prices |
+| `synced_at` | TIMESTAMPTZ | NOT NULL DEFAULT now() | Last sync time |
+| `created_at` / `updated_at` | TIMESTAMPTZ | NOT NULL DEFAULT now() | |
+
+**Index:** `synced_at DESC`
+
+---
+
+### `usage_pricing_overrides`
+
+Per-tenant, per-provider price overrides applied on top of the catalog. (migration 070)
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | UUID | PK DEFAULT gen_random_uuid() | |
+| `tenant_id` | UUID FK → tenants | NOT NULL ON DELETE CASCADE | Owning tenant |
+| `provider_id` | UUID FK → llm_providers | NOT NULL ON DELETE CASCADE | Target provider |
+| `provider_type` | TEXT | NOT NULL | Provider type |
+| `model_id` | TEXT | NOT NULL | Target model |
+| `input_price` … `web_search_price` | NUMERIC(30,18) | `>= 0` or NULL | Override prices (same set as catalog) |
+| `enabled` | BOOLEAN | NOT NULL DEFAULT true | |
+| `created_at` / `updated_at` | TIMESTAMPTZ | NOT NULL DEFAULT now() | |
+
+**Unique:** `(tenant_id, provider_id, model_id)`
+
+**Index:** `(tenant_id, provider_id, model_id)` (partial, `WHERE enabled`)
+
+---
+
+### `usage_cap_policies`
+
+Token/cost cap rules evaluated per tenant, optionally scoped to an agent, provider, provider type, or model, over a rolling time window. (migration 071; `source` column added migration 072)
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | UUID | PK DEFAULT gen_random_uuid() | |
+| `tenant_id` | UUID FK → tenants | NOT NULL ON DELETE CASCADE | Owning tenant |
+| `agent_id` | UUID FK → agents | NULL ON DELETE CASCADE | Agent scope; NULL = all agents |
+| `provider_id` | UUID FK → llm_providers | NULL ON DELETE CASCADE | Provider scope |
+| `provider_type` | TEXT | | Provider type scope |
+| `model_id` | TEXT | | Model scope |
+| `window_key` | TEXT | NOT NULL CHECK in (`hour`, `day`, `week`, `month`) | Cap window |
+| `max_tokens` | BIGINT | `>= 0` or NULL | Token cap |
+| `max_cost_micros` | BIGINT | `>= 0` or NULL | Cost cap in micro-USD |
+| `enabled` | BOOLEAN | NOT NULL DEFAULT true | |
+| `priority` | INTEGER | NOT NULL DEFAULT 100 | Lower-priority policies evaluated first |
+| `source` | TEXT | NOT NULL DEFAULT `manual` | `manual` or `agent_budget_monthly_cents` (migration 072) |
+| `created_at` / `updated_at` | TIMESTAMPTZ | NOT NULL DEFAULT now() | |
+
+**Constraint:** at least one of `max_tokens` / `max_cost_micros` must be set.
+
+**Indexes:** `(tenant_id, enabled, agent_id, provider_id, provider_type, model_id)`; unique `(tenant_id, agent_id)` partial `WHERE source = 'agent_budget_monthly_cents'` (one budget-derived policy per agent, migration 072)
+
+---
+
+### `usage_cap_counters`
+
+Per-window accumulators (used + reserved) for each policy. (migration 071)
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `policy_id` | UUID FK → usage_cap_policies | NOT NULL ON DELETE CASCADE | Parent policy |
+| `window_start` / `window_end` | TIMESTAMPTZ | NOT NULL | Window bounds |
+| `used_tokens` / `reserved_tokens` | BIGINT | NOT NULL DEFAULT 0 | Token usage |
+| `used_cost_micros` / `reserved_cost_micros` | BIGINT | NOT NULL DEFAULT 0 | Cost usage in micro-USD |
+| `updated_at` | TIMESTAMPTZ | NOT NULL DEFAULT now() | |
+
+**PK:** `(policy_id, window_start)`
+
+---
+
+### `usage_cap_reservations`
+
+In-flight reservations that hold capacity before a request completes, later reconciled to actuals. (migration 071)
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | UUID | PK DEFAULT gen_random_uuid() | |
+| `reservation_key` | TEXT | NOT NULL | Caller-supplied idempotency key |
+| `policy_id` | UUID FK → usage_cap_policies | NOT NULL ON DELETE CASCADE | Parent policy |
+| `window_start` | TIMESTAMPTZ | NOT NULL | Reservation window |
+| `reserved_tokens` / `reserved_cost_micros` | BIGINT | NOT NULL DEFAULT 0 | Reserved amounts |
+| `actual_tokens` / `actual_cost_micros` | BIGINT | NOT NULL DEFAULT 0 | Reconciled actuals |
+| `status` | TEXT | NOT NULL DEFAULT `reserved` | Reservation state |
+| `metadata` | JSONB | NOT NULL DEFAULT `{}` | |
+| `created_at` / `updated_at` | TIMESTAMPTZ | NOT NULL DEFAULT now() | |
+
+**Unique:** `(reservation_key, policy_id)`
+
+**Index:** `reservation_key`
+
+---
+
+### `usage_cap_events`
+
+Audit log of cap decisions (allow/deny) and their reasons. (migration 071)
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | UUID | PK DEFAULT gen_random_uuid() | |
+| `tenant_id` | UUID FK → tenants | NOT NULL ON DELETE CASCADE | Owning tenant |
+| `policy_id` | UUID FK → usage_cap_policies | NULL ON DELETE SET NULL | Policy that produced the decision |
+| `reservation_key` | TEXT | | Related reservation, if any |
+| `decision` | TEXT | NOT NULL | Decision outcome |
+| `reason` | TEXT | | Human-readable reason |
+| `estimated_tokens` / `estimated_cost_micros` | BIGINT | NOT NULL DEFAULT 0 | Pre-flight estimates |
+| `actual_tokens` / `actual_cost_micros` | BIGINT | NOT NULL DEFAULT 0 | Final actuals |
+| `metadata` | JSONB | NOT NULL DEFAULT `{}` | |
+| `created_at` | TIMESTAMPTZ | NOT NULL DEFAULT now() | |
+
+**Index:** `(tenant_id, created_at DESC)`
+
+---
+
+### `run_timeline_items`
+
+Per-run ordered timeline of items (messages, tool calls, etc.) used to replay archived runs. (migration 074)
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | UUID | PK DEFAULT uuid_generate_v7() | |
+| `tenant_id` | UUID FK → tenants | NOT NULL ON DELETE CASCADE | Owning tenant |
+| `run_id` | TEXT | NOT NULL | Run identifier |
+| `session_key` | VARCHAR(500) | NOT NULL | Session this run belongs to |
+| `agent_id` | UUID FK → agents | ON DELETE SET NULL | Agent that produced the run |
+| `user_id` | VARCHAR(255) | | User scope |
+| `channel` | VARCHAR(50) | | Channel |
+| `chat_id` | VARCHAR(255) | | Chat ID |
+| `seq` | INT | NOT NULL | Ordering within the run |
+| `item_type` | VARCHAR(40) | NOT NULL | Item kind (message, tool call, etc.) |
+| `status` | VARCHAR(40) | | Item status |
+| `title` | TEXT | | Item title |
+| `preview` | TEXT | | Short preview |
+| `content` | TEXT | NOT NULL DEFAULT '' | Full item content |
+| `tool_name` | VARCHAR(255) | | Tool name, when applicable |
+| `tool_call_id` | VARCHAR(255) | | Tool call ID |
+| `trace_id` | UUID FK → traces | ON DELETE SET NULL | Linked trace |
+| `span_id` | UUID FK → spans | ON DELETE SET NULL | Linked span |
+| `metadata` | JSONB | NOT NULL DEFAULT `{}` | |
+| `created_at` | TIMESTAMPTZ | NOT NULL DEFAULT now() | |
+
+**Unique:** `(tenant_id, run_id, seq)`
+**Indexes:** `(tenant_id, run_id, seq)`; `(tenant_id, session_key, created_at DESC)`; `(tenant_id, trace_id) WHERE trace_id IS NOT NULL`
+
+---
+
+### Channel context capabilities
+
+Per-channel-instance, scoped MCP and secure-CLI grants plus encrypted credentials. All four tables share a scope model: `scope_type VARCHAR(32)` + `scope_key VARCHAR(255) DEFAULT ''` let a grant apply to the whole channel instance or narrow to a specific scope (e.g. a chat or user). (migration 075)
+
+**`mcp_context_grants`** — enables an MCP server for a channel-instance scope.
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | UUID | PK DEFAULT uuid_generate_v7() | |
+| `tenant_id` | UUID FK → tenants | NOT NULL ON DELETE CASCADE | |
+| `channel_instance_id` | UUID FK → channel_instances | NOT NULL ON DELETE CASCADE | |
+| `scope_type` | VARCHAR(32) | NOT NULL | Scope kind |
+| `scope_key` | VARCHAR(255) | NOT NULL DEFAULT '' | Scope value |
+| `server_id` | UUID FK → mcp_servers | NOT NULL ON DELETE CASCADE | MCP server granted |
+| `enabled` | BOOLEAN | NOT NULL DEFAULT true | |
+| `tool_allow` / `tool_deny` / `config_overrides` | JSONB | | Per-scope tool filters and overrides |
+| `granted_by` | VARCHAR(255) | NOT NULL | Actor who granted |
+| `created_at` / `updated_at` | TIMESTAMPTZ | NOT NULL DEFAULT now() | |
+
+**Unique:** `(tenant_id, channel_instance_id, scope_type, scope_key, server_id)` · **Indexes:** scope, `server_id`
+
+**`mcp_context_credentials`** — encrypted credentials for the scoped MCP server. Same scope key as above plus `api_key TEXT`, `headers BYTEA`, `env BYTEA`, `created_by VARCHAR(255) NOT NULL`, timestamps. Same unique key and indexes.
+
+**`secure_cli_context_grants`** — enables a secure-CLI binary for a channel-instance scope. Same scope key plus `binary_id UUID FK → secure_cli_binaries ON DELETE CASCADE`, `deny_args`/`deny_verbose JSONB`, `timeout_seconds INTEGER`, `tips TEXT`, `encrypted_env BYTEA`, `enabled BOOLEAN NOT NULL DEFAULT true`, `granted_by VARCHAR(255) NOT NULL`, timestamps. **Unique:** `(tenant_id, channel_instance_id, scope_type, scope_key, binary_id)` · **Indexes:** scope, `binary_id`.
+
+**`secure_cli_context_credentials`** — encrypted credentials for the scoped secure-CLI binary. Same scope key plus `binary_id`, `encrypted_env BYTEA NOT NULL`, `metadata JSONB NOT NULL DEFAULT '{}'`, `credential_type TEXT`, `host_scope TEXT`, `created_by VARCHAR(255) NOT NULL`, timestamps. Same unique key and indexes as the grants table.
+
+---
+
+### Channel memory extraction
+
+Passive, scheduled extraction of durable memory from channel history. Stores no raw message bodies — only summaries pending review. (migration 076)
+
+**`channel_memory_extraction_runs`** — one extraction pass over a slice of channel history.
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | UUID | PK | |
+| `tenant_id` | UUID FK → tenants | NOT NULL ON DELETE CASCADE | |
+| `channel_instance_id` | UUID FK → channel_instances | NOT NULL ON DELETE CASCADE | |
+| `channel_name` | VARCHAR(255) | NOT NULL | |
+| `agent_id` | UUID FK → agents | NOT NULL ON DELETE CASCADE | |
+| `user_id` | VARCHAR(255) | NOT NULL DEFAULT '' | |
+| `history_key` | VARCHAR(255) | NOT NULL | History bucket key |
+| `trigger` | VARCHAR(32) | NOT NULL DEFAULT 'scheduled' | What started the run |
+| `status` | VARCHAR(32) | NOT NULL DEFAULT 'pending' | Run status |
+| `source_start_id` / `source_end_id` | VARCHAR(255) | NOT NULL DEFAULT '' | Source message range |
+| `source_start_at` / `source_end_at` | TIMESTAMPTZ | | Source time range |
+| `message_count` / `redaction_count` / `item_count` | INTEGER | NOT NULL DEFAULT 0 | Counters |
+| `redaction_types` | JSONB | NOT NULL DEFAULT `[]` | Redaction categories applied |
+| `error_message` | TEXT | NOT NULL DEFAULT '' | |
+| `started_at` / `completed_at` | TIMESTAMPTZ | | |
+| `created_at` / `updated_at` | TIMESTAMPTZ | NOT NULL DEFAULT now() | |
+
+**Unique:** `(tenant_id, channel_instance_id, history_key, source_start_id, source_end_id)` · **Indexes:** channel, status
+
+**`channel_memory_extraction_items`** — review queue of candidate memory items.
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | UUID | PK | |
+| `tenant_id` | UUID FK → tenants | NOT NULL ON DELETE CASCADE | |
+| `run_id` | UUID FK → channel_memory_extraction_runs | NOT NULL ON DELETE CASCADE | Parent run |
+| `channel_instance_id` | UUID FK → channel_instances | NOT NULL ON DELETE CASCADE | |
+| `agent_id` | UUID FK → agents | NOT NULL ON DELETE CASCADE | |
+| `user_id` | VARCHAR(255) | NOT NULL DEFAULT '' | |
+| `item_hash` | VARCHAR(128) | NOT NULL | Dedup hash |
+| `item_type` | VARCHAR(64) | NOT NULL | |
+| `summary` | TEXT | NOT NULL | Extracted summary (no raw body) |
+| `topics` / `entities` | JSONB | NOT NULL DEFAULT `[]` | |
+| `confidence` | DOUBLE PRECISION | NOT NULL DEFAULT 0 | |
+| `source_id` | VARCHAR(255) | NOT NULL DEFAULT '' | |
+| `status` | VARCHAR(32) | NOT NULL DEFAULT 'pending_review' | Review status |
+| `approved_by` / `rejected_by` | VARCHAR(255) | NOT NULL DEFAULT '' | Review actors |
+| `approved_at` / `rejected_at` / `deleted_at` / `written_at` | TIMESTAMPTZ | | Review/lifecycle timestamps |
+| `episodic_id` | VARCHAR(64) | NOT NULL DEFAULT '' | Written episodic memory ID |
+| `created_at` / `updated_at` | TIMESTAMPTZ | NOT NULL DEFAULT now() | |
+
+**Unique:** `(tenant_id, run_id, item_hash)` · **Indexes:** channel+status, run
+
+---
+
+### `secure_cli_agent_credentials`
+
+Per-agent typed credentials for secure-CLI binaries, stored separately from the `secure_cli_agent_grants` policy. Runtime resolution order is user → context → agent → binary defaults. (migration 077)
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | UUID | PK DEFAULT gen_random_uuid() | |
+| `binary_id` | UUID | NOT NULL | CLI binary (composite FK with `tenant_id`) |
+| `agent_id` | UUID | NOT NULL | Agent (composite FK with `tenant_id`) |
+| `encrypted_env` | BYTEA | NOT NULL | AES-256-GCM encrypted env |
+| `metadata` | JSONB | NOT NULL DEFAULT `{}` | |
+| `tenant_id` | UUID FK → tenants | NOT NULL | Owning tenant |
+| `credential_type` | TEXT | NULL | Optional credential type |
+| `host_scope` | TEXT | NULL | Optional host scope |
+| `created_by` | VARCHAR(255) | NOT NULL DEFAULT '' | |
+| `created_at` / `updated_at` | TIMESTAMPTZ | NOT NULL DEFAULT now() | |
+
+**Unique:** `(binary_id, agent_id, tenant_id)`
+**Composite FKs:** `(binary_id, tenant_id)` → `secure_cli_binaries(id, tenant_id)` CASCADE; `(agent_id, tenant_id)` → `agents(id, tenant_id)` CASCADE (backed by new unique indexes `idx_secure_cli_binaries_id_tenant` and `idx_agents_id_tenant`)
+**Indexes:** tenant, binary, agent
+
+---
+
+### Skill self-evolution
+
+Tracks how each existing skill performs over time and records suggested, applied improvements. Distinct from agent-level evolution metrics. (migration 079)
+
+**`skill_evolution_settings`** — per-tenant/per-skill toggle and mode.
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `tenant_id` | UUID FK → tenants | NOT NULL ON DELETE CASCADE | PK part |
+| `skill_id` | UUID FK → skills | NOT NULL ON DELETE CASCADE | PK part |
+| `enabled` | BOOLEAN | NOT NULL DEFAULT false | |
+| `mode` | VARCHAR(32) | NOT NULL DEFAULT 'suggest_only', CHECK in (`suggest_only`, `auto_analyze`) | |
+| `last_analyzed_at` | TIMESTAMPTZ | | |
+| `created_at` / `updated_at` | TIMESTAMPTZ | NOT NULL DEFAULT now() | |
+
+**Primary key:** `(tenant_id, skill_id)` · **Index:** `skill_id`
+
+**`skill_usage_metrics`** — one row per recorded skill invocation.
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | UUID | PK DEFAULT uuid_generate_v7() | |
+| `tenant_id` | UUID FK → tenants | NOT NULL ON DELETE CASCADE | |
+| `skill_id` | UUID FK → skills | NOT NULL ON DELETE CASCADE | |
+| `skill_slug` | VARCHAR(255) | NOT NULL | |
+| `skill_version` | INT | NOT NULL DEFAULT 1 | |
+| `agent_id` | UUID FK → agents | ON DELETE SET NULL | |
+| `user_id` | VARCHAR(255) | | |
+| `session_key` / `trace_id` / `invocation_id` | TEXT | | Linkage |
+| `invocation_source` | VARCHAR(32) | NOT NULL DEFAULT 'runtime' | |
+| `status` | VARCHAR(32) | NOT NULL DEFAULT 'started', CHECK in (`started`, `succeeded`, `failed`, `abandoned`) | |
+| `failure_reason` | TEXT | | |
+| `tool_calls_count` | INT | NOT NULL DEFAULT 0 | |
+| `duration_ms` | BIGINT | NOT NULL DEFAULT 0 | |
+| `created_at` | TIMESTAMPTZ | NOT NULL DEFAULT now() | |
+
+**Indexes:** `(skill_id, created_at DESC)`; `(tenant_id, created_at DESC)`; `(skill_id, status, created_at DESC)`; partial on `invocation_id`
+
+**`skill_improvement_suggestions`** — suggested patches with evidence.
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | UUID | PK DEFAULT uuid_generate_v7() | |
+| `tenant_id` | UUID FK → tenants | NOT NULL ON DELETE CASCADE | |
+| `skill_id` | UUID FK → skills | NOT NULL ON DELETE CASCADE | |
+| `skill_slug` | VARCHAR(255) | NOT NULL | |
+| `suggestion_type` | VARCHAR(64) | NOT NULL | |
+| `status` | VARCHAR(32) | NOT NULL DEFAULT 'pending', CHECK in (`pending`, `approved`, `rejected`, `applied`) | |
+| `reason` | TEXT | NOT NULL DEFAULT '' | |
+| `evidence` / `draft_patch` | JSONB | NOT NULL DEFAULT `{}` | Supporting evidence + proposed patch |
+| `target_file` | TEXT | NOT NULL DEFAULT '' | |
+| `created_by_actor_type` / `created_by_actor_id` | VARCHAR | NOT NULL DEFAULT '' | |
+| `reviewed_by_actor_type` / `reviewed_by_actor_id` | VARCHAR | NOT NULL DEFAULT '' | |
+| `reviewed_at` | TIMESTAMPTZ | | |
+| `applied_version` | INT | | Version produced if applied |
+| `created_at` / `updated_at` | TIMESTAMPTZ | NOT NULL DEFAULT now() | |
+
+**Indexes:** `(skill_id, status, created_at DESC)`; `(tenant_id, created_at DESC)`
+
+**`skill_versions`** — immutable version records for applied changes. `id UUID PK`, `tenant_id`/`skill_id` FK CASCADE, `version INT NOT NULL`, `content_hash VARCHAR(64)`, `changed_files JSONB`, created-by actor columns, `created_from_suggestion_id UUID FK → skill_improvement_suggestions ON DELETE SET NULL`, `created_at`. **Unique:** `(skill_id, version)` · **Index:** `(tenant_id, skill_id, version DESC)`. The migration backfills one row per existing non-deleted skill.
+
+---
+
+### Usage event analytics
+
+Raw per-event analytics plus pre-aggregated hourly rollups backing the usage analytics dashboard. Distinct from `usage_snapshots` (migration 016) and the `usage_cap_*` / `usage_pricing_*` family. (migration 080)
+
+**`usage_events`** — one row per billable/measurable event.
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | UUID | PK | |
+| `tenant_id` | UUID FK → tenants | NOT NULL | |
+| `event_time` / `bucket_hour` | TIMESTAMPTZ | NOT NULL | Event time and hourly bucket |
+| `event_type` / `resource_type` / `resource_name` | TEXT | NOT NULL | Event dimensions |
+| `resource_id` / `source` | TEXT | NOT NULL DEFAULT '' | |
+| `agent_id` | UUID FK → agents | ON DELETE SET NULL | |
+| `team_id` | UUID | | |
+| `trace_id` | UUID FK → traces | ON DELETE SET NULL | |
+| `span_id` | UUID FK → spans | ON DELETE SET NULL | |
+| `run_id` / `session_key` / `channel` / `provider` / `model` / `status` | TEXT | NOT NULL DEFAULT '' | |
+| `input_tokens` / `output_tokens` / `total_tokens` | BIGINT | NOT NULL DEFAULT 0 | |
+| `cost_usd` | DOUBLE PRECISION | NOT NULL DEFAULT 0 | |
+| `duration_ms` / `call_count` / `error_count` | INTEGER | NOT NULL DEFAULT 0 / 1 / 0 | |
+| `metadata` | JSONB | | |
+| `created_at` | TIMESTAMPTZ | NOT NULL DEFAULT now() | |
+
+**Indexes:** tenant+time; tenant+resource+time; tenant+type+time; tenant+agent+time; partial tenant+channel+time `WHERE channel != ''`; **unique partial** `(trace_id, span_id, event_type, source) WHERE trace_id IS NOT NULL AND span_id IS NOT NULL` (idempotent ingest)
+
+**`usage_event_rollups`** — pre-aggregated hourly rollups over the same dimensions (`bucket_hour`, `event_type`, `resource_type`, `resource_name`, `source`, `agent_id`, `channel`, `provider`, `model`, `status`) with summed counts/tokens/cost. **Unique** on the full dimension tuple using `COALESCE(agent_id, '00000000-0000-0000-0000-000000000000')`. **Indexes:** `(tenant_id, bucket_hour DESC)`; `(tenant_id, resource_type, resource_name, bucket_hour DESC)`.
+
+---
+
+## What's Next
+
+- [Environment Variables](/env-vars) — `GOCLAW_POSTGRES_DSN` and `GOCLAW_ENCRYPTION_KEY`
+- [Config Reference](/config-reference) — how database config maps to `config.json`
+- [Glossary](/glossary) — Session, Compaction, Lane, and other key terms
+
+<!-- goclaw-source: fabe86b3 | updated: 2026-06-29 -->

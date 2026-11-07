@@ -1,0 +1,371 @@
+> Bản dịch từ [English version](/channel-telegram)
+
+# Channel Telegram
+
+Tích hợp Telegram bot qua long polling (Bot API). Hỗ trợ DM, nhóm, forum topic, chuyển giọng nói thành văn bản, và phản hồi streaming.
+
+## Thiết lập
+
+**Tạo Telegram Bot:**
+1. Nhắn tin @BotFather trên Telegram
+2. `/newbot` → chọn tên và username
+3. Sao chép token (định dạng: `123456:ABCDEFGHIJKLMNOPQRSTUVWxyz...`)
+
+> **Quan trọng — Group Privacy Mode:** Mặc định, Telegram bot chạy ở **privacy mode** và chỉ nhận được command (`/`) và @mention trong group. Để bot đọc được tất cả tin nhắn trong group (cần thiết cho history buffer, `require_mention: false`, và group context), nhắn **@BotFather** → `/setprivacy` → chọn bot → **Disable**. Nếu không, bot sẽ bỏ qua hầu hết tin nhắn trong group.
+
+**Bật Telegram:**
+
+```json
+{
+  "channels": {
+    "telegram": {
+      "enabled": true,
+      "token": "YOUR_BOT_TOKEN",
+      "dm_policy": "pairing",
+      "group_policy": "open",
+      "allow_from": ["alice", "bob"]
+    }
+  }
+}
+```
+
+## Cấu hình
+
+Tất cả config key nằm trong `channels.telegram`:
+
+| Key | Kiểu | Mặc định | Mô tả |
+|-----|------|---------|-------------|
+| `enabled` | bool | false | Bật/tắt channel |
+| `token` | string | bắt buộc | Bot API token từ BotFather |
+| `proxy` | string | -- | HTTP proxy (ví dụ: `http://proxy:8080`) |
+| `allow_from` | list | -- | Allowlist user ID hoặc username |
+| `dm_policy` | string | `"pairing"` | `pairing`, `allowlist`, `open`, `disabled` |
+| `group_policy` | string | `"open"` | `open`, `allowlist`, `disabled` |
+| `require_mention` | bool | true | Yêu cầu mention @bot trong group |
+| `mention_mode` | string | `"strict"` | `strict` = chỉ phản hồi khi @mention; `yield` = phản hồi trừ khi bot khác được @mention (group nhiều bot) |
+| `history_limit` | int | 50 | Tin nhắn chờ tối đa mỗi nhóm (0=tắt) |
+| `dm_stream` | bool | false | Bật streaming cho DM (chỉnh sửa placeholder) |
+| `group_stream` | bool | false | Bật streaming cho nhóm (tin nhắn mới) |
+| `draft_transport` | bool | false | Dùng `sendMessageDraft` cho DM streaming (stealth preview, không thông báo mỗi lần edit) |
+| `reasoning_delivery` | string | -- | Cách reasoning được hiển thị: `off`, `streaming_only`, `always_bubbles`. Xem [Reasoning Delivery](#reasoning-delivery). |
+| `reasoning_stream` | bool | true | **Legacy.** Hiển thị reasoning token dưới dạng tin nhắn riêng trước câu trả lời. Chỉ dùng khi `reasoning_delivery` chưa được đặt. |
+| `block_reply` | bool | -- | Ghi đè cài đặt `block_reply` của gateway cho channel này (nil = kế thừa) |
+| `chat_behavior` | object | -- | Ghi đè [human-like delivery](/channels-overview#human-like-delivery) của gateway cho channel này (nil = kế thừa) |
+| `reaction_level` | string | `"off"` | `off`, `minimal` (chỉ ⏳), `full` (⏳💬🛠️✅❌🔄) |
+| `media_max_bytes` | int | 20MB | Kích thước file media tối đa |
+| `link_preview` | bool | true | Hiển thị xem trước URL |
+| `force_ipv4` | bool | false | Bắt buộc dùng IPv4 cho tất cả kết nối Telegram API |
+| `api_server` | string | -- | URL server Telegram Bot API tuỳ chỉnh (ví dụ: `http://localhost:8081`) |
+| `stt_proxy_url` | string | -- | URL dịch vụ STT (để chuyển giọng nói thành văn bản) |
+| `stt_api_key` | string | -- | Bearer token cho STT proxy |
+| `stt_timeout_seconds` | int | 30 | Timeout cho request STT |
+| `voice_agent_id` | string | -- | Định tuyến voice message đến agent cụ thể |
+
+**Giới hạn upload media**: Trường `media_max_bytes` áp đặt hard limit cho outbound media upload do agent gửi (mặc định 20 MB). File vượt giới hạn bị skip và ghi log. Không ảnh hưởng đến inbound media từ user.
+
+## Cấu hình nhóm
+
+Ghi đè cài đặt theo từng nhóm (và theo topic) dùng object `groups`.
+
+```json
+{
+  "channels": {
+    "telegram": {
+      "token": "...",
+      "groups": {
+        "-100123456789": {
+          "group_policy": "allowlist",
+          "allow_from": ["@alice", "@bob"],
+          "require_mention": false,
+          "topics": {
+            "42": {
+              "require_mention": true,
+              "tools": ["web_search", "file_read"],
+              "system_prompt": "You are a research assistant."
+            }
+          }
+        },
+        "*": {
+          "system_prompt": "Global system prompt for all groups."
+        }
+      }
+    }
+  }
+}
+```
+
+Các config key cho nhóm:
+
+- `group_policy` — Ghi đè chính sách cấp nhóm
+- `allow_from` — Ghi đè allowlist
+- `require_mention` — Ghi đè yêu cầu mention
+- `mention_mode` — Ghi đè mention mode (`strict` hoặc `yield`)
+- `skills` — Whitelist skill (nil=tất cả, []=không có)
+- `tools` — Whitelist tool (hỗ trợ cú pháp `group:xxx`)
+- `system_prompt` — Extra system prompt cho nhóm này
+- `topics` — Ghi đè theo topic (key: topic/thread ID)
+
+## Tính năng
+
+### Mention Gating
+
+Trong group, bot chỉ phản hồi tin nhắn có mention nó (mặc định `require_mention: true`). Khi không được mention, tin nhắn được lưu vào pending history buffer (mặc định 50 tin nhắn) và được đưa vào context khi bot được mention. Reply vào tin nhắn của bot được tính là mention.
+
+#### Mention Mode
+
+| Mode | Hành vi | Trường hợp sử dụng |
+|------|---------|---------------------|
+| `strict` (mặc định) | Chỉ phản hồi khi @mention hoặc reply | Group có 1 bot |
+| `yield` | Phản hồi tất cả tin nhắn TRỪ KHI bot/user khác được @mention | Group nhiều bot |
+
+**Yield mode** cho phép nhiều bot cùng hoạt động trong một group:
+- Bot phản hồi tất cả tin nhắn khi không có @mention cụ thể nhắm đến bot khác
+- Nếu user @mention bot khác, bot này im lặng (nhường)
+- Tin nhắn từ bot khác tự động bị bỏ qua để tránh vòng lặp vô hạn giữa các bot
+- Cross-bot @command vẫn hoạt động (ví dụ: `@my_bot help` gửi bởi bot khác)
+
+```json
+{
+  "channels": {
+    "telegram": {
+      "mention_mode": "yield",
+      "require_mention": false
+    }
+  }
+}
+```
+
+```mermaid
+flowchart TD
+    MSG["User gửi tin trong group"] --> MODE{"mention_mode?"}
+    MODE -->|strict| MENTION{"Bot được @mention<br/>hoặc reply?"}
+    MODE -->|yield| OTHER{"Bot/user khác<br/>được @mention?"}
+    OTHER -->|Có| YIELD["Nhường — im lặng"]
+    OTHER -->|Không| PROCESS
+    MENTION -->|Không| BUFFER["Thêm vào pending history<br/>(tối đa 50 tin nhắn)"]
+    MENTION -->|Có| PROCESS["Xử lý ngay<br/>Kèm history làm context"]
+    BUFFER --> NEXT["Mention tiếp theo:<br/>history được đưa vào"]
+```
+
+### Thông tin nhận dạng bot trong system prompt
+
+Khi khởi động, GoClaw xác định username và tên hiển thị của bot trên Telegram, sau đó chèn một đoạn nhận dạng ngắn vào system prompt của agent:
+
+```
+You are @mybot (My Bot) on this Telegram channel.
+```
+
+Điều này cho agent biết handle của chính mình để giải nghĩa đúng các @mention trong cuộc trò chuyện nhóm — đặc biệt hữu ích trong nhóm nhiều bot, khi các @mention của bot khác vẫn được giữ lại trong nội dung tin nhắn sau khi đã loại bỏ mention của bot.
+
+### Loại bỏ @mention của bot trong tin nhắn đến
+
+Trước khi truyền nội dung tin nhắn cho agent, GoClaw loại bỏ `@username` của bot khỏi văn bản. Như vậy agent nhận được nội dung sạch không có handle của chính mình. Ví dụ: tin nhắn `"@mybot thời tiết hôm nay thế nào?"` sẽ được gửi đến agent là `"thời tiết hôm nay thế nào?"`.
+
+Các @mention của bot khác được giữ nguyên để agent có thể phát hiện tương tác giữa các bot.
+
+### Chú thích tin nhắn nhóm
+
+Trong chat nhóm, mỗi tin nhắn được thêm tiền tố `[From:]` để agent biết ai đang nói:
+
+```
+[From: @username (Tên hiển thị)]
+Nội dung tin nhắn
+```
+
+Định dạng label phụ thuộc vào dữ liệu user:
+- Username + tên hiển thị: `@username (Tên hiển thị)`
+- Chỉ username: `@username`
+- Chỉ tên hiển thị: `Tên hiển thị`
+
+Chú thích này cũng được thêm vào tin nhắn DM để nhận diện người gửi nhất quán.
+
+### Group Concurrency
+
+Group session hỗ trợ tối đa **3 agent run đồng thời**. Khi đạt giới hạn này, các tin nhắn tiếp theo sẽ được xếp hàng chờ. Áp dụng cho tất cả group context và forum topic.
+
+### Forum Topic
+
+Cấu hình hành vi bot theo từng forum topic:
+
+| Khía cạnh | Key | Ví dụ |
+|--------|-----|---------|
+| Topic ID | Chat ID + topic ID | `-12345:topic:99` |
+| Tra cứu config | Merge theo lớp | Global → Wildcard → Group → Topic |
+| Giới hạn tool | `tools: ["web_search"]` | Chỉ web search trong topic |
+| Extra prompt | `system_prompt` | Hướng dẫn dành riêng cho topic |
+
+### Định dạng tin nhắn
+
+Markdown output được chuyển đổi sang Telegram HTML với escape đúng chuẩn:
+
+```
+LLM output (Markdown)
+  → Trích xuất bảng/code → Chuyển Markdown sang HTML
+  → Khôi phục placeholder → Chunk theo 4,000 ký tự
+  → Gửi dạng HTML (fallback: plain text)
+```
+
+Bảng được render dạng ASCII trong tag `<pre>`. Ký tự CJK được tính là chiều rộng 2 cột.
+
+### Speech-to-Text (STT)
+
+Voice và audio message có thể được chuyển thành văn bản:
+
+```json
+{
+  "channels": {
+    "telegram": {
+      "stt_proxy_url": "https://stt.example.com",
+      "stt_api_key": "sk-...",
+      "stt_timeout_seconds": 30,
+      "voice_agent_id": "voice_assistant"
+    }
+  }
+}
+```
+
+Khi user gửi voice message:
+1. File được tải xuống từ Telegram
+2. Gửi đến STT proxy dạng multipart (file + tenant_id)
+3. Transcript được thêm vào đầu tin nhắn: `[audio: filename] Transcript: text`
+4. Định tuyến đến `voice_agent_id` nếu được cấu hình, ngược lại đến agent mặc định
+
+Transcription chạy qua chuỗi STT thống nhất của GoClaw, thử các provider theo thứ tự — `elevenlabs`, rồi `proxy`. (Đây là tên provider hiện tại; các bản phát hành cũ gọi chúng là `elevenlabs_scribe` và `proxy_stt`.) Telegram giữ nguyên MIME type gốc của voice khi chuyển audio vào chuỗi, và phần ghi đè bridge STT-proxy legacy được định khóa theo platform type `telegram`.
+
+### Streaming
+
+Bật cập nhật phản hồi trực tiếp:
+
+- **DM** (`dm_stream`): Edit placeholder "Thinking..." khi từng chunk đến. Mặc định dùng `sendMessage+editMessageText`; đặt `draft_transport: true` để dùng `sendMessageDraft` (stealth preview, không thông báo mỗi lần edit, nhưng có thể gây lỗi "reply to deleted message" trên một số client).
+- **Group** (`group_stream`): Gửi placeholder, edit với phản hồi đầy đủ
+
+Mặc định tắt.
+
+### Reasoning Delivery
+
+Khi model phát ra reasoning token ("thinking"), `reasoning_delivery` kiểm soát cách — hay liệu có — reasoning đó hiển thị trong chat:
+
+| `reasoning_delivery` | Hành vi |
+|----------------------|----------|
+| `streaming_only` | Reasoning chỉ xuất hiện trong làn streaming trực tiếp (hành vi legacy). |
+| `always_bubbles` | Buộc provider streaming nội bộ và gửi reasoning dưới dạng các tin nhắn "bubble" bình thường có giới hạn — kể cả khi `dm_stream` / `group_stream` đang tắt. Câu trả lời cuối vẫn được gửi không streaming. |
+| `off` | Reasoning bị ẩn trong channel. Traces và hạch toán usage không bị ảnh hưởng. |
+
+**Tương thích ngược.** Khi `reasoning_delivery` chưa được đặt, giá trị boolean legacy `reasoning_stream` được tôn trọng: `reasoning_stream: false` phân giải thành `off`, ngược lại thành `streaming_only`. Một giá trị `reasoning_delivery` rõ ràng luôn thắng giá trị boolean legacy.
+
+Reasoning bubble chỉ liên quan đến việc gửi — chúng không được thêm vào lịch sử assistant/session. Telegram hiện là channel duy nhất triển khai cơ chế kiểm soát này (`ReasoningDeliveryChannel`).
+
+### Xử lý Media
+
+**Album / gộp nhiều file đính kèm.** Khi người dùng gửi một album (nhiều ảnh hoặc file gom lại trên client), Telegram giao nó dưới dạng N update riêng biệt cùng chung một `MediaGroupID`. GoClaw buffer các thành viên album ở tầng channel (cửa sổ im lặng 500 ms) và tổng hợp chúng thành **một** tin nhắn đến, nên agent trả lời một lần thay vì một lần cho mỗi file. Khóa buffer là `(chatID, MediaGroupID)`; người gửi được ghim từ thành viên đầu tiên, và một thành viên đến với người gửi không khớp sẽ bị loại bỏ như một biện pháp phòng vệ.
+
+**Gom album gửi ra ngoài.** Khi agent gửi nhiều file cùng lúc — qua dạng `attachments: [{path, caption?}, ...]` của tool `send_file` — Telegram gom media tương thích gửi ra thành các đoạn album `sendMediaGroup` gồm **2–10** mục. Ảnh và video có thể chung một đoạn; document chỉ gom với document và audio chỉ gom với audio. Audio voice-mode, đoạn đơn lẻ, ảnh quá khổ bị chuyển sang gửi dưới dạng document, và các chuỗi không tương thích khác sẽ thoái lui mượt mà về gửi từng file theo thứ tự. Thứ tự file, MIME type, tên file, và caption đều được giữ nguyên.
+
+**Giới hạn upload ra ngoài.** Media gửi ra được kiểm tra với ngưỡng upload trước khi gửi — file vượt giới hạn bị từ chối với lỗi rõ ràng "outbound media too large" thay vì hỏng giữa chừng. Ngưỡng là 50 MB trên Bot API chính thức và 200 MB khi cấu hình một Bot API server cục bộ (`api_server`) (hoặc cao hơn nếu `media_max_bytes` được nâng trên mức đó).
+
+**Giữ nguyên đường dẫn archive.** File đến giữ nguyên phần mở rộng gốc khi được lưu (ví dụ một file upload `codex.zip` vẫn là `.zip` thay vì bị đổi thành tên chung), nên các skill và công cụ xử lý tài liệu có thể nhận diện và giải nén archive đúng cách ở phía sau.
+
+### Reaction
+
+Hiển thị trạng thái emoji trên tin nhắn user. Đặt `reaction_level`:
+
+> Typing indicator reaction giờ có error recovery tốt hơn — invalid reaction type được handle gracefully thay vì gây lỗi.
+
+- `off` — Không có reaction (mặc định)
+- `minimal` — Chỉ trạng thái kết thúc (done/error)
+- `full` — Tất cả chuyển đổi trạng thái với debouncing và phát hiện stall
+
+**Bảng ánh xạ Status → Emoji** (dùng `/reactions` trong chat để xem bảng chú giải):
+
+| Status | Emoji | Mô tả |
+|--------|-------|-------|
+| queued | 👀 | Đang chờ xử lý |
+| thinking | 🤔 | Đang xử lý yêu cầu |
+| tool | ✍ | Đang thực thi tool |
+| coding | 👨‍💻 | Đang chạy code |
+| web | ⚡ | Duyệt web / API call |
+| done | 👍 | Hoàn thành |
+| error | 💔 | Có lỗi xảy ra |
+| stallSoft | 🥱 | Không hoạt động 10 giây |
+| stallHard | 😨 | Không hoạt động 30 giây |
+
+Mỗi status có emoji dự phòng trong trường hợp emoji chính bị hạn chế bởi reaction cho phép của chat. Các trạng thái trung gian (thinking, tool, v.v.) được debounce ở 700ms để tránh spam reaction.
+
+> **Không có văn bản tool-status placeholder.** Các cập nhật tool-status xác định chỉ được hiển thị qua reaction — chúng không còn phát ra một tin nhắn văn bản "tool" riêng trong channel. Reaction của nền tảng và việc gửi reasoning rõ ràng vẫn là các hành vi độc lập.
+
+### Lệnh Bot
+
+Lệnh được xử lý trước bước message enrichment:
+
+| Lệnh | Hành vi | Hạn chế |
+|---------|----------|-----------|
+| `/help` | Hiển thị danh sách lệnh | -- |
+| `/start` | Chuyển tiếp đến agent | -- |
+| `/stop` | Huỷ lần chạy hiện tại | -- |
+| `/stopall` | Huỷ tất cả lần chạy | -- |
+| `/reset` | Xoá lịch sử session | Chỉ Writer |
+| `/status` | Trạng thái bot + username | -- |
+| `/tasks` | Danh sách task của team | -- |
+| `/task_detail <id>` | Xem task | -- |
+| `/subagents` | Liệt kê tất cả subagent task đang hoạt động cùng trạng thái | -- |
+| `/subagent <id>` | Xem chi tiết một subagent task từ DB | -- |
+| `/reactions` | Hiển thị bảng chú giải emoji phản ứng (status → emoji) | -- |
+| `/addwriter` | Thêm file writer nhóm | Chỉ Writer |
+| `/removewriter` | Xoá file writer nhóm | Chỉ Writer |
+| `/writers` | Liệt kê writer nhóm | -- |
+
+Writer là thành viên nhóm được phép chạy lệnh nhạy cảm (`/reset`, ghi file). Quản lý qua `/addwriter` và `/removewriter` (reply vào tin nhắn của user mục tiêu).
+
+## Network Isolation
+
+Mỗi Telegram instance duy trì HTTP transport riêng biệt — không share connection pool giữa các bot. Điều này ngăn cross-bot contention và cho phép network routing theo từng account.
+
+| Tuỳ chọn | Mặc định | Mô tả |
+|--------|---------|-------------|
+| `force_ipv4` | false | Bắt buộc dùng IPv4 cho tất cả connection. Hữu ích cho sticky routing hoặc khi IPv6 bị lỗi/chặn. |
+| `proxy` | -- | URL HTTP proxy cho instance bot này (ví dụ: `http://proxy:8080`). |
+| `api_server` | -- | Server Telegram Bot API tuỳ chỉnh. Hữu ích với local Bot API server hoặc private deployment. |
+
+**Sticky IPv4 fallback**: Khi `force_ipv4: true`, dialer được lock vào `tcp4` lúc khởi động, đảm bảo source IP nhất quán cho tất cả request đến Telegram. Hữu ích cho rate limit management trong môi trường có IPv6 không ổn định.
+
+```json
+{
+  "channels": {
+    "telegram": {
+      "token": "...",
+      "force_ipv4": true,
+      "proxy": "http://proxy.example.com:8080",
+      "api_server": "http://localhost:8081"
+    }
+  }
+}
+```
+
+## Chuyển đổi Group sang Supergroup
+
+Khi một Telegram group được nâng cấp thành supergroup, chat ID sẽ thay đổi. GoClaw xử lý tự động:
+
+- **Phát hiện tin nhắn đến** — Khi nhận được message `MigrateToChatID`, GoClaw cập nhật tất cả tham chiếu DB (paired_devices, sessions, channel_contacts) atomically và xóa cache trong bộ nhớ
+- **Retry khi gửi** — Nếu gửi tin thất bại do group đã migrate, GoClaw phát hiện chat ID mới từ Telegram API error, cập nhật DB và tự động gửi lại
+- **Idempotent** — An toàn khi kích hoạt nhiều lần; các migration trùng lặp là no-op
+
+Không cần cấu hình. Kiểm tra log với `telegram: migrating group chat` nếu cần troubleshoot.
+
+## Xử lý sự cố
+
+| Vấn đề | Giải pháp |
+|-------|----------|
+| Bot không phản hồi trong group | Đảm bảo đã tắt privacy mode qua @BotFather (`/setprivacy` → Disable). Kiểm tra `require_mention=true` (mặc định) — mention bot hoặc reply vào tin nhắn của nó. Với group nhiều bot, thử `mention_mode: "yield"`. |
+| Tải media thất bại | Xác minh bot đã Disable privacy mode trong @BotFather (`/setprivacy` → Disable). Kiểm tra giới hạn `media_max_bytes`. |
+| Thiếu transcript STT | Xác minh URL proxy STT và API key. Kiểm tra log về timeout. |
+| Streaming không hoạt động | Bật `dm_stream` hoặc `group_stream`. Đảm bảo provider hỗ trợ streaming. |
+| Định tuyến topic thất bại | Kiểm tra topic ID trong config key (integer thread ID). Generic topic (ID=1) bị loại bỏ trong Telegram API. |
+
+## Tiếp theo
+
+- [Tổng quan](/channels-overview) — Khái niệm, chính sách channel và [inbound debounce](/channels-overview#inbound-debounce)
+- [Discord](/channel-discord) — Thiết lập Discord bot
+- [Browser Pairing](/channel-browser-pairing) — Luồng pairing
+- [Sessions & History](../core-concepts/sessions-and-history.md) — Lịch sử cuộc trò chuyện
+
+<!-- goclaw-source: fabe86b3 | cập nhật: 2026-06-28 -->

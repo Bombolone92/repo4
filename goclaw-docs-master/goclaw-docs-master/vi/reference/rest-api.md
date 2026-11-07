@@ -1,0 +1,2262 @@
+> Bản dịch từ [English version](/rest-api)
+
+# REST API
+
+> Tất cả HTTP endpoint `/v1` cho quản lý agent, provider, skills, traces, và nhiều hơn.
+
+## Tổng quan
+
+> **Cần index đầy đủ?** Xem [Danh mục Endpoint API](api-endpoints-catalog.md) — danh sách auto-gen của toàn bộ REST endpoint.
+
+HTTP API của GoClaw được serve trên cùng port với WebSocket gateway. Tất cả endpoint đều yêu cầu `Bearer` token trong header `Authorization` khớp với `GOCLAW_GATEWAY_TOKEN`.
+
+Tài liệu tương tác: `/docs` (Swagger UI) · spec thô: `/v1/openapi.json`
+
+**Base URL:** `http://<host>:<port>`
+
+**Auth header:**
+```
+Authorization: Bearer YOUR_GATEWAY_TOKEN
+```
+
+**User identity header** (tùy chọn, để scope theo từng user):
+```
+X-GoClaw-User-Id: user123
+```
+
+### Header phổ biến
+
+| Header | Mục đích |
+|--------|---------|
+| `Authorization` | Bearer token |
+| `X-GoClaw-User-Id` | External user ID cho multi-tenant context |
+| `X-GoClaw-Agent-Id` | Agent identifier cho scoped operation |
+| `X-GoClaw-Tenant-Id` | Tenant scope — UUID hoặc slug |
+| `Accept-Language` | Locale (`en`, `vi`, `zh`) cho i18n error message |
+| `X-GoClaw-No-Image-Gen` | (tùy chọn) Gửi để opt-out native image generation cho request đó. Bypass cả provider capability lẫn agent flag tri-level gate. Áp dụng cho chat endpoints. |
+
+**Kiểm tra input:** Tất cả string input được sanitize — ký tự đặc biệt SQL được escape trong ILIKE query, request body giới hạn 1 MB, tên agent/provider/tool được kiểm tra theo allowlist pattern (`[a-zA-Z0-9_-]`).
+
+---
+
+## Chat Completions
+
+API chat tương thích OpenAI để truy cập agent theo chương trình.
+
+### `POST /v1/chat/completions`
+
+```bash
+curl -X POST http://localhost:18790/v1/chat/completions \
+  -H "Authorization: Bearer TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "goclaw:agent-id-or-key",
+    "messages": [{"role": "user", "content": "Hello"}],
+    "stream": false
+  }'
+```
+
+**Response** (non-streaming):
+
+```json
+{
+  "id": "chatcmpl-...",
+  "object": "chat.completion",
+  "choices": [{
+    "index": 0,
+    "message": {"role": "assistant", "content": "..."},
+    "finish_reason": "stop"
+  }],
+  "usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}
+}
+```
+
+Đặt `"stream": true` để nhận SSE chunk kết thúc bằng `data: [DONE]`.
+
+`X-GoClaw-User-Id` cũng quyết định session identity của Chat Completions. Các request được resolve về cùng user ID và agent sẽ dùng lại một session ổn định, nhờ đó giữ context hội thoại giữa các lần gọi. Nếu không resolve được user identity (ví dụ không có header và API key cũng không bind owner), GoClaw tạo session key ngẫu nhiên theo từng run, nên call là stateless. Deployment managed có thể bắt buộc user identity thay vì cho phép fallback này.
+
+---
+
+## OpenResponses Protocol
+
+### `POST /v1/responses`
+
+Protocol dựa trên response thay thế (tương thích OpenAI Responses API). Nhận cùng auth và trả về response object có cấu trúc.
+
+---
+
+## Sessions
+
+Khám phá và branch session ở chế độ read-only qua HTTP, dành cho automation không thể giữ kết nối WebSocket. Caller không phải admin chỉ thấy session của chính mình (khớp `X-GoClaw-User-Id`); admin và token gateway-owner thấy mọi session.
+
+> Vòng đời session đầy đủ (preview, patch, delete, reset, compact) có sẵn qua [WebSocket RPC](/websocket-protocol#sessions). Các route HTTP này phục vụ việc khám phá, branch và đọc history theo từng phần.
+
+### `GET /v1/sessions`
+
+Liệt kê session có phân trang.
+
+```bash
+curl "http://localhost:18790/v1/sessions?agent_id=AGENT_UUID&limit=20&offset=0" \
+  -H "Authorization: Bearer TOKEN" \
+  -H "X-GoClaw-User-Id: user123"
+```
+
+**Query param:**
+
+| Param | Kiểu | Mô tả |
+|-------|------|-------|
+| `agent_id` | string | Lọc theo agent (alias: `agentId`) |
+| `channel` | string | Lọc theo channel |
+| `limit` | integer | Kích thước trang (mặc định 20) |
+| `offset` | integer | Offset trang (mặc định 0) |
+
+**Response:** `{ "sessions": [...], "total": N, "limit": 20, "offset": 0 }`
+
+### `POST /v1/chat/sessions/{key}/branch`
+
+Branch một session mới từ session có sẵn, copy message tới một index cho trước. Đoạn path `{key}` là session key **nguồn**; branch dùng lại cùng agent key.
+
+```bash
+curl -X POST http://localhost:18790/v1/chat/sessions/{key}/branch \
+  -H "Authorization: Bearer TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "up_to_index": 8,
+    "new_session_key": "",
+    "label": "what-if branch",
+    "metadata": {}
+  }'
+```
+
+| Field | Kiểu | Mô tả |
+|-------|------|-------|
+| `up_to_index` | integer | Bắt buộc. Copy message `[0, up_to_index)` vào branch |
+| `new_session_key` | string | Tùy chọn. Phải dùng cùng agent key với nguồn. Tự sinh nếu bỏ trống |
+| `label` | string | Nhãn branch tùy chọn cho người đọc |
+| `metadata` | object | Metadata key-value dạng string tùy chọn |
+
+**Response** (`201 Created`):
+
+```json
+{
+  "ok": true,
+  "source_key": "agent:researcher:direct:...",
+  "session_key": "agent:researcher:branch:direct:...",
+  "copied_messages": 8,
+  "total_messages": 20,
+  "label": "what-if branch"
+}
+```
+
+Trả về `409` nếu key đích đã tồn tại, `400` nếu `up_to_index` ngoài phạm vi.
+
+### `GET /v1/chat/sessions/{key}/history/follow`
+
+Đọc history theo từng phần dựa trên cursor — poll message mới mà không cần fetch lại toàn bộ transcript. Các tham chiếu file và media trong message trả về đều được ký (signed).
+
+**Query param:**
+
+| Param | Kiểu | Mô tả |
+|-------|------|-------|
+| `cursor` | integer | Index bắt đầu đọc (mặc định 0) |
+| `limit` | integer | Số message tối đa trả về (mặc định 50, tối đa 200) |
+
+**Response:**
+
+```json
+{
+  "session_key": "agent:researcher:direct:...",
+  "cursor": 0,
+  "next_cursor": 50,
+  "total": 120,
+  "messages": [ ... ],
+  "reset": false,
+  "updated": "2026-06-07T08:00:00Z"
+}
+```
+
+Truyền `next_cursor` làm `cursor` kế tiếp để đọc tiếp. `reset: true` (kèm `messages` rỗng) báo hiệu cursor đã vượt quá độ dài history hiện tại — bắt đầu lại từ `0`.
+
+---
+
+## Agents
+
+CRUD để quản lý agent. Yêu cầu header `X-GoClaw-User-Id` cho multi-tenant context.
+
+### `GET /v1/agents`
+
+Liệt kê tất cả agents.
+
+```bash
+curl http://localhost:18790/v1/agents \
+  -H "Authorization: Bearer TOKEN"
+```
+
+### `POST /v1/agents`
+
+Tạo agent mới.
+
+```bash
+curl -X POST http://localhost:18790/v1/agents \
+  -H "Authorization: Bearer TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "agent_key": "researcher",
+    "display_name": "Research Assistant",
+    "agent_type": "open",
+    "provider": "anthropic",
+    "model": "claude-sonnet-4-5-20250929",
+    "context_window": 200000,
+    "max_tool_iterations": 20,
+    "workspace": "~/.goclaw/workspace-researcher"
+  }'
+```
+
+### `GET /v1/agents/{id}`
+
+Lấy một agent theo ID.
+
+### `PUT /v1/agents/{id}`
+
+Cập nhật agent. Chỉ gửi các field cần thay đổi.
+
+### `DELETE /v1/agents/{id}`
+
+Xóa agent.
+
+### `POST /v1/agents/{id}/regenerate`
+
+Tạo lại context file của agent từ template.
+
+### `POST /v1/agents/{id}/resummon`
+
+Kích hoạt lại LLM-based summoning cho predefined agent.
+
+### `POST /v1/agents/{id}/cancel-summon`
+
+Hủy bỏ cưỡng bức quá trình summoning bị kẹt. Chuyển agent đang ở trạng thái `summoning` sang `summon_failed` để có thể cấu hình lại hoặc kích hoạt lại. Trả về `409` nếu agent không ở trạng thái `summoning`.
+
+### `POST /v1/agents/sync-workspace`
+
+Cập nhật mọi agent trong tenant hiện tại để dùng workspace root mới. Yêu cầu **admin role**.
+
+```json
+{ "workspace": "~/goclaw-workspaces" }
+```
+
+`workspace` là bắt buộc và không được chứa `..`. GoClaw expand `~`, sau đó đặt workspace của mỗi agent thành `{workspace đã expand}/{agent_key}`. Agent đã dùng đúng path sẽ được bỏ qua; lỗi cập nhật riêng lẻ cũng được bỏ qua và không tính vào kết quả.
+
+**Response** (`200 OK`):
+
+```json
+{ "ok": true, "updated": 4 }
+```
+
+JSON không hợp lệ, `workspace` rỗng, hoặc path chứa `..` trả về `400`.
+
+### Agent Shares
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `GET` | `/v1/agents/{id}/shares` | Liệt kê shares của agent |
+| `POST` | `/v1/agents/{id}/shares` | Chia sẻ agent với user |
+| `DELETE` | `/v1/agents/{id}/shares/{userID}` | Thu hồi share |
+
+### Predefined Agent Instances
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `GET` | `/v1/agents/{id}/instances` | Liệt kê user instance |
+| `GET` | `/v1/agents/{id}/instances/{userID}/files` | Liệt kê context file của user |
+| `PUT` | `/v1/agents/{id}/instances/{userID}/files/{fileName}` | Cập nhật user file (admin) |
+| `PATCH` | `/v1/agents/{id}/instances/{userID}/metadata` | Cập nhật instance metadata |
+| `GET` | `/v1/agents/{id}/system-prompt-preview` | Xem trước system prompt đã render (admin) |
+
+> Để đọc nội dung file, hãy liệt kê file qua `GET /v1/agents/{id}/instances/{userID}/files` rồi truy xuất qua API [Vault](#knowledge-vault) hoặc [Storage](#storage). Không có endpoint GET đơn lẻ cho instance file.
+
+### Export / Import Agent
+
+Xuất và nhập cấu hình + dữ liệu agent dưới dạng archive tar.gz. Hỗ trợ xuất từng section tuỳ chọn.
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `GET` | `/v1/agents/{id}/export/preview` | Xem trước số lượng từng section (không tạo archive) |
+| `GET` | `/v1/agents/{id}/export` | Tải xuống archive agent trực tiếp (tar.gz) |
+| `GET` | `/v1/agents/{id}/export/download/{token}` | Tải archive đã chuẩn bị qua token ngắn hạn (hết hạn sau 5 phút) |
+| `POST` | `/v1/agents/import` | Import archive thành **agent mới** (multipart field `file`) |
+| `POST` | `/v1/agents/import/preview` | Parse archive và trả manifest mà không import |
+| `POST` | `/v1/agents/{id}/import` | **Merge** dữ liệu archive vào agent hiện có |
+
+**Query params cho export:**
+
+| Param | Kiểu | Mô tả |
+|-------|------|-------|
+| `sections` | string | Danh sách section cách nhau bởi dấu phẩy. Mặc định: `config,context_files`. Có thể chọn: `config`, `context_files`, `memory`, `knowledge_graph`, `cron`, `user_profiles`, `user_overrides`, `workspace` |
+| `stream` | `bool` | Khi `true`, trả SSE progress rồi event `complete` kèm `download_url` |
+
+**Import query params (`POST /v1/agents/import`):**
+
+| Param | Kiểu | Mô tả |
+|-------|------|-------|
+| `agent_key` | string | Ghi đè agent key (mặc định lấy từ archive) |
+| `display_name` | string | Ghi đè display name |
+| `stream` | `bool` | Stream tiến trình import qua SSE |
+
+**Merge import query params (`POST /v1/agents/{id}/import`):**
+
+| Param | Kiểu | Mô tả |
+|-------|------|-------|
+| `include` | string | Danh sách section cần merge, cách nhau bởi dấu phẩy. Mặc định là tất cả section |
+| `stream` | `bool` | Stream tiến trình merge qua SSE |
+
+**Archive format** (`agent-{key}-YYYYMMDD.tar.gz`):
+
+```
+manifest.json                              — archive manifest (version, sections summary)
+agent.json                                 — agent config (sensitive fields stripped)
+context_files/{filename}                   — agent-level context files
+user_context_files/{user_id}/{filename}    — per-user context files
+memory/global.jsonl                        — global memory documents
+memory/users/{user_id}.jsonl               — per-user memory documents
+knowledge_graph/entities.jsonl             — KG entities (portable external IDs)
+knowledge_graph/relations.jsonl            — KG relations
+cron/jobs.jsonl                            — cron job definitions
+user_profiles.jsonl                        — user profile records
+user_overrides.jsonl                       — per-user model overrides
+workspace/                                 — workspace directory files
+```
+
+**Import response** (`201 Created`):
+
+```json
+{
+  "agent_id": "uuid",
+  "agent_key": "researcher",
+  "context_files": 3,
+  "memory_docs": 12,
+  "kg_entities": 50,
+  "kg_relations": 30
+}
+```
+
+> Cron job luôn được import ở trạng thái **disabled**. Job trùng tên sẽ bị bỏ qua. Giới hạn archive: 500 MB.
+
+---
+
+### `GET /v1/agents/{id}/codex-pool-activity`
+
+Trả về hoạt động routing và sức khỏe từng tài khoản cho agent đang dùng [Codex OAuth pool](/provider-codex). Yêu cầu provider của agent là kiểu `chatgpt_oauth` với pool đã được cấu hình.
+
+**Xác thực:** Cần Bearer token. Người dùng phải có quyền truy cập agent.
+
+**Query parameter:**
+
+| Param | Kiểu | Mặc định | Mô tả |
+|-------|------|----------|-------|
+| `limit` | integer | `18` | Số request gần đây trả về (tối đa 50) |
+
+**Giá trị `strategy` trong response:**
+
+| Giá trị | Mô tả |
+|---------|-------|
+| `round_robin` | Phân phối đều theo vòng |
+| `priority_order` | Ưu tiên provider theo thứ tự cấu hình (mặc định) |
+
+> **BREAKING (v3.11.0):** Response giờ trả `priority_order` thay vì `primary_first` cho cùng cấu hình. Client so sánh strategy string theo giá trị literal phải cập nhật. Legacy values (`primary_first`, `manual`, `""`) vẫn được chấp nhận ở **request body** để backward-compat — chúng được normalize sang `priority_order` khi đọc.
+
+**Response:**
+
+```json
+{
+  "strategy": "priority_order",
+  "pool_providers": ["openai-codex", "codex-work"],
+  "stats_sample_size": 24,
+  "provider_counts": [
+    {
+      "provider_name": "openai-codex",
+      "request_count": 14,
+      "direct_selection_count": 10,
+      "failover_serve_count": 4,
+      "success_count": 13,
+      "failure_count": 1,
+      "consecutive_failures": 0,
+      "success_rate": 92,
+      "health_score": 88,
+      "health_state": "healthy",
+      "last_used_at": "2026-03-27T08:00:00Z"
+    }
+  ],
+  "recent_requests": [
+    {
+      "span_id": "uuid",
+      "trace_id": "uuid",
+      "started_at": "2026-03-27T08:00:00Z",
+      "status": "success",
+      "duration_ms": 1240,
+      "provider_name": "openai-codex",
+      "selected_provider": "openai-codex",
+      "model": "gpt-5.4",
+      "attempt_count": 1,
+      "used_failover": false
+    }
+  ]
+}
+```
+
+Nếu agent không dùng provider `chatgpt_oauth` hoặc pool chưa được cấu hình, `pool_providers` là mảng rỗng và `provider_counts`/`recent_requests` cũng rỗng.
+
+Trả về `503` nếu tracing store không khả dụng.
+
+---
+
+### Wake (External Trigger)
+
+```
+POST /v1/agents/{id}/wake
+```
+
+```json
+{
+  "message": "Process new data",
+  "session_key": "optional-session",
+  "user_id": "optional-user",
+  "metadata": {}
+}
+```
+
+Response: `{content, run_id, usage?}`. Dùng bởi orchestrator (n8n, Paperclip) để kích hoạt agent run từ bên ngoài.
+
+---
+
+## Providers
+
+### `GET /v1/providers`
+
+Liệt kê tất cả LLM provider.
+
+### `POST /v1/providers`
+
+Tạo LLM provider.
+
+```bash
+curl -X POST http://localhost:18790/v1/providers \
+  -H "Authorization: Bearer TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "my-openrouter",
+    "display_name": "OpenRouter",
+    "provider_type": "openai_compat",
+    "api_base": "https://openrouter.ai/api/v1",
+    "api_key": "sk-or-...",
+    "enabled": true
+  }'
+```
+
+**Loại được hỗ trợ:** `anthropic_native`, `openai_compat`, `chatgpt_oauth`, `gemini_native`, `dashscope`, `bailian`, `minimax`, `claude_cli`, `acp`
+
+### `GET /v1/providers/{id}`
+
+Lấy provider theo ID.
+
+### `PUT /v1/providers/{id}`
+
+Cập nhật provider.
+
+### `DELETE /v1/providers/{id}`
+
+Xóa provider.
+
+### `GET /v1/providers/{id}/models`
+
+Liệt kê model có sẵn từ provider (proxy đến upstream API).
+
+### `POST /v1/providers/{id}/verify`
+
+Xác minh kết nối provider hoặc một model cụ thể. Request body là tùy chọn (`requestBody.required: false`).
+
+**Ping mode** — bỏ qua body (hoặc gửi `{}`). Trả về `{"valid": true}` nếu provider đã được đăng ký và có thể kết nối. Tương đương kiểm tra `/healthz`; không thực hiện LLM call.
+
+```bash
+curl -X POST http://localhost:18790/v1/providers/{id}/verify \
+  -H "Authorization: Bearer TOKEN"
+```
+
+**Chat-verify mode** — bao gồm `model` để thực hiện chat completion thực tế với một model alias cụ thể.
+
+```bash
+curl -X POST http://localhost:18790/v1/providers/{id}/verify \
+  -H "Authorization: Bearer TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "anthropic/claude-sonnet-4"}'
+```
+
+**Response shape** — `{"valid": true}` khi thành công, `{"valid": false, "error": "<msg>"}` khi thất bại. Định dạng cũ `{success, models}` không còn được trả về.
+
+### `POST /v1/providers/{id}/verify-embedding`
+
+Xác minh kết nối embedding model cho một provider.
+
+### `POST /v1/providers/{id}/reconnect`
+
+Thiết lập lại kết nối in-memory cho một provider — hủy đăng ký khỏi runtime registry rồi đăng ký lại từ config đã lưu. Dùng sau khi sửa credential hoặc khi provider biến mất khỏi live registry. **Không** thực hiện verify; gọi `/verify` riêng nếu cần.
+
+```bash
+curl -X POST http://localhost:18790/v1/providers/{id}/reconnect \
+  -H "Authorization: Bearer TOKEN"
+```
+
+Request body là tùy chọn. Gửi `{"verify": true}` sẽ bị từ chối với `400` — reconnect và verify là hai thao tác riêng biệt.
+
+**Response:**
+
+```json
+{
+  "status": "reconnected",
+  "provider": { "id": "uuid", "name": "my-openrouter", "...": "..." },
+  "registry_updated": true,
+  "cache_invalidated": true
+}
+```
+
+`status` là `reconnected` (đã đăng ký lại in-memory), `not_registered` (đang bật nhưng đăng ký thất bại), hoặc `disabled` (provider bị tắt). Một event `cache_invalidate` được phát ra để các agent đang kết nối cập nhật thay đổi.
+
+### `GET /v1/providers/{id}/codex-pool-activity`
+
+Trả về hoạt động routing của Codex OAuth pool ở cấp provider (xem thêm endpoint cấp agent ở trên).
+
+### `GET /v1/embedding/status`
+
+Kiểm tra embedding đã được cấu hình và khả dụng hay chưa.
+
+### `GET /v1/providers/claude-cli/auth-status`
+
+Kiểm tra trạng thái Claude CLI authentication (global, không phải per-provider).
+
+---
+
+## Skills
+
+### `GET /v1/skills`
+
+Liệt kê tất cả skills.
+
+### `POST /v1/skills/upload`
+
+Upload skill dưới dạng file `.zip` (tối đa 20 MB).
+
+```bash
+curl -X POST http://localhost:18790/v1/skills/upload \
+  -H "Authorization: Bearer TOKEN" \
+  -F "file=@my-skill.zip"
+```
+
+### `GET /v1/skills/{id}`
+
+Lấy skill metadata.
+
+### `PUT /v1/skills/{id}`
+
+Cập nhật skill metadata.
+
+### `DELETE /v1/skills/{id}`
+
+Xóa skill.
+
+### `POST /v1/skills/{id}/toggle`
+
+Bật/tắt skill.
+
+### `PUT /v1/skills/{id}/tenant-config`
+
+Đặt cấu hình ghi đè cho skill theo tenant (ví dụ: bật/tắt cho tenant hiện tại). Chỉ admin.
+
+### `DELETE /v1/skills/{id}/tenant-config`
+
+Xóa cấu hình ghi đè theo tenant (khôi phục về mặc định). Chỉ admin.
+
+### Skills Export / Import
+
+Xuất và nhập custom skill dưới dạng archive tar.gz.
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `GET` | `/v1/skills/export/preview` | Xem trước số lượng trước khi export (không tạo archive) |
+| `GET` | `/v1/skills/export` | Tải xuống skills archive trực tiếp (tar.gz) |
+| `POST` | `/v1/skills/import` | Import skills archive (multipart field `file`) |
+
+**Query params cho export:**
+
+| Param | Kiểu | Mô tả |
+|-------|------|-------|
+| `stream` | `bool` | Khi `true`, trả SSE progress rồi event `complete` kèm `download_url` |
+| `format` | string | Định dạng archive — `tar.gz` (mặc định), `tgz` (alias cho gzip tar), hoặc `zip`. ZIP chỉ dùng cho export/download; import vẫn yêu cầu định dạng skills bundle |
+| `id` | string | Chọn một skill theo ID. Lặp lại param để chọn nhiều skill |
+| `ids` | string | Chọn nhiều skill ID dưới dạng danh sách phân tách bằng dấu phẩy |
+| `include_system` | `bool` | Bao gồm system skill trong full export khi không chọn ID nào |
+
+> `GET /v1/skills/export` hỗ trợ cả **tải xuống trực tiếp** (archive được stream trong response) và luồng SSE token (`stream=true` → `download_url`). Nếu không có `id`/`ids`, export giữ tương thích ngược và mặc định bao gồm các custom skill của tenant.
+
+**Archive format** (`skills-YYYYMMDD.tar.gz`):
+
+```
+skills/{slug}/metadata.json   — skill metadata (name, slug, visibility, tags)
+skills/{slug}/SKILL.md        — skill file content
+skills/{slug}/grants.jsonl    — agent grants (agent_key + pinned version)
+```
+
+**Import response** (`201 Created`):
+
+```json
+{
+  "skills_imported": 3,
+  "skills_skipped": 1,
+  "grants_applied": 5
+}
+```
+
+> Skill bị bỏ qua nếu slug đã tồn tại trong tenant. Grant tham chiếu agent theo `agent_key` — key không tìm thấy sẽ bị bỏ qua.
+
+---
+
+### Skill Grants
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `GET` | `/v1/skills/{id}/grants/agent` | Liệt kê agent grants cho skill (admin+) |
+| `POST` | `/v1/skills/{id}/grants/agent` | Cấp skill cho agent (body hỗ trợ flag `can_manage`, migration 66) |
+| `DELETE` | `/v1/skills/{id}/grants/agent/{agentID}` | Thu hồi agent grant |
+| `POST` | `/v1/skills/{id}/grants/user` | Cấp skill cho user |
+| `DELETE` | `/v1/skills/{id}/grants/user/{userID}` | Thu hồi user grant |
+| `GET` | `/v1/agents/{agentID}/skills` | Liệt kê skills agent có thể truy cập |
+
+### Skill Files & Dependencies
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `GET` | `/v1/skills/{id}/versions` | Liệt kê version có sẵn |
+| `GET` | `/v1/skills/{id}/files` | Liệt kê file trong skill |
+| `GET` | `/v1/skills/{id}/files/{path...}` | Đọc nội dung file |
+| `POST` | `/v1/skills/rescan-deps` | Rescan runtime dependency |
+| `POST` | `/v1/skills/install-deps` | Cài đặt tất cả dependency còn thiếu |
+| `POST` | `/v1/skills/install-dep` | Cài đặt một dependency đơn lẻ |
+| `GET` | `/v1/skills/runtimes` | Kiểm tra runtime có sẵn |
+
+---
+
+### Tự tiến hóa & Metrics của Skill
+
+Skill có thể thu thập metric sử dụng và tự đề xuất cải tiến cho chính nó. Tự tiến hóa được scope theo tenant và **mặc định tắt theo từng skill**. Metric sử dụng chỉ được ghi bởi các đường runtime đáng tin cậy (ví dụ tool `use_skill` và việc kích hoạt slash-command) — không có endpoint công khai để ghi metric sử dụng.
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `GET` | `/v1/skills/{id}/evolution` | Đọc cấu hình tự tiến hóa của một skill |
+| `PATCH` | `/v1/skills/{id}/evolution` | Cập nhật trạng thái bật hoặc mode (tenant-admin) |
+| `GET` | `/v1/skills/{id}/metrics` | Tổng hợp metric sử dụng + đếm theo status |
+| `GET` | `/v1/skills/{id}/activity` | Log hoạt động tiến hóa (chỉ admin) |
+| `GET` | `/v1/skills/{id}/evolution/suggestions` | Liệt kê đề xuất cải tiến scope theo skill |
+| `POST` | `/v1/skills/{id}/evolution/suggestions` | Tạo đề xuất kèm bằng chứng + draft patch (tenant-admin) |
+| `POST` | `/v1/skills/{id}/evolution/suggestions/{suggestionID}/approve` | Duyệt một đề xuất (tenant-admin) |
+| `POST` | `/v1/skills/{id}/evolution/suggestions/{suggestionID}/reject` | Từ chối một đề xuất (tenant-admin) |
+| `POST` | `/v1/skills/{id}/evolution/suggestions/{suggestionID}/apply` | Áp dụng đề xuất đã duyệt → version skill mới (tenant-admin) |
+
+**Mode tiến hóa (`PATCH .../evolution`, field `mode`):**
+
+| Mode | Hành vi |
+|------|---------|
+| `suggest_only` | Thu thập metric và quản lý đề xuất; không tự động patch |
+| `auto_analyze` | Dành riêng cho automation phân tích. **Việc áp dụng patch luôn yêu cầu duyệt tường minh** |
+
+> Caller vai trò viewer/operator có thể đọc metric tổng hợp. Raw activity, actor ID, bằng chứng lỗi, draft patch, và hành động apply chỉ dành cho admin. Không thể thay đổi system skill; áp dụng một đề xuất cho custom skill sẽ ghi một thư mục version mới và một bản ghi `skill_versions`.
+
+### Kiểm soát truy cập & Grant của Skill (batch)
+
+Đọc và quản lý ai có thể dùng một skill. Các route số nhiều `grants/agents` và `grants/users` nhận tập **batch**; các route số ít đã mô tả ở [Skill Grants](#skill-grants) vẫn dùng được cho grant đơn lẻ. Tất cả route yêu cầu **vai trò admin**.
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `GET` | `/v1/skills/{id}/access` | Đọc cấu hình access (visibility + agent/user grants) |
+| `PATCH` | `/v1/skills/{id}/access` | Cập nhật cấu hình access (ví dụ `visibility`) |
+| `GET` | `/v1/skills/{id}/access/effective` | Access hiệu lực cho skill này |
+| `GET` | `/v1/skills/access/effective` | Access hiệu lực trên tất cả skill |
+| `GET` | `/v1/skills/{id}/grants/agents` | Liệt kê agent grant (chế độ batch) |
+| `POST` | `/v1/skills/{id}/grants/agents` | Batch-set agent grant (`agent_id`, tùy chọn `version`/`pinned_version`, `can_manage`) |
+| `DELETE` | `/v1/skills/{id}/grants/agents/{agentID}` | Xóa một agent grant |
+| `GET` | `/v1/skills/{id}/grants/users` | Liệt kê user grant (chế độ batch) |
+| `POST` | `/v1/skills/{id}/grants/users` | Batch-set user grant (`user_id`) |
+| `DELETE` | `/v1/skills/{id}/grants/users/{userID}` | Xóa một user grant |
+
+**Response access-hiệu-lực** bao gồm `accessible`, `reason`, `can_manage`, và tùy chọn `pinned_version` cho mỗi skill.
+
+### Skill Dependencies
+
+Kiểm tra và giải quyết runtime dependency của một skill. Yêu cầu **vai trò admin**.
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `GET` | `/v1/skills/{id}/dependencies` | Liệt kê dependency của skill và trạng thái của chúng |
+| `POST` | `/v1/skills/{id}/dependencies/scan` | Quét lại các dependency khai báo và làm mới trạng thái |
+| `POST` | `/v1/skills/{id}/dependencies/check` | Kiểm tra xem dependency đã được thỏa mãn chưa |
+| `POST` | `/v1/skills/{id}/dependencies/install` | Cài đặt dependency còn thiếu cho skill |
+
+---
+
+## Tools
+
+### Direct Invocation
+
+```
+POST /v1/tools/invoke
+```
+
+```json
+{
+  "tool": "web_fetch",
+  "action": "fetch",
+  "args": {"url": "https://example.com"},
+  "dryRun": false,
+  "agentId": "optional",
+  "channel": "optional",
+  "chatId": "optional",
+  "peerKind": "direct"
+}
+```
+
+Đặt `"dryRun": true` để trả về tool schema mà không thực thi.
+
+### Built-in Tools
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `GET` | `/v1/tools/builtin` | Liệt kê tất cả built-in tool |
+| `GET` | `/v1/tools/builtin/{name}` | Lấy định nghĩa tool |
+| `GET` | `/v1/tools/builtin/{name}/tenant-config` | Lấy cấu hình theo tenant của built-in tool |
+| `PUT` | `/v1/tools/builtin/{name}` | Cập nhật enabled/settings |
+| `PUT` | `/v1/tools/builtin/{name}/tenant-config` | Đặt cấu hình ghi đè theo tenant (admin) |
+| `DELETE` | `/v1/tools/builtin/{name}/tenant-config` | Xóa cấu hình ghi đè theo tenant (admin) |
+
+> **Lưu ý:** Custom tools qua REST API hiện chưa được triển khai. MCP servers và skills là cơ chế mở rộng được khuyến nghị.
+
+---
+
+## Memory
+
+Vector memory per-agent sử dụng pgvector.
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `GET` | `/v1/memory/documents` | Liệt kê tất cả document globally |
+| `GET` | `/v1/agents/{agentID}/memory/documents` | Liệt kê document của agent |
+| `GET` | `/v1/agents/{agentID}/memory/documents/{path...}` | Lấy chi tiết document |
+| `PUT` | `/v1/agents/{agentID}/memory/documents/{path...}` | Tạo/cập nhật document |
+| `DELETE` | `/v1/agents/{agentID}/memory/documents/{path...}` | Xóa document |
+| `GET` | `/v1/agents/{agentID}/memory/chunks` | Liệt kê chunk của document |
+| `POST` | `/v1/agents/{agentID}/memory/index` | Index một document |
+| `POST` | `/v1/agents/{agentID}/memory/index-all` | Index tất cả document |
+| `POST` | `/v1/agents/{agentID}/memory/search` | Semantic search |
+
+Query param tùy chọn `?user_id=` để scope theo user.
+
+---
+
+## Khả năng Agent V3
+
+> Tính năng mới trong v3. Bật theo từng agent qua [V3 Feature Flags](#v3-feature-flags).
+
+### Evolution (Tiến hóa agent)
+
+Theo dõi metric sử dụng tool và nhận gợi ý cải thiện tự động.
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `GET` | `/v1/agents/{agentID}/evolution/metrics` | Liệt kê metric evolution thô hoặc tổng hợp |
+| `GET` | `/v1/agents/{agentID}/evolution/suggestions` | Liệt kê gợi ý evolution |
+| `PATCH` | `/v1/agents/{agentID}/evolution/suggestions/{suggestionID}` | Cập nhật trạng thái gợi ý (`pending` → `approved`/`rejected`/`rolled_back`) |
+
+**Query params của `GET .../evolution/metrics`:** `type` (lọc: `tool`/`retrieval`/`feedback`), `aggregate` (boolean), `since` (ISO 8601), `limit`
+
+**Query params của `GET .../evolution/suggestions`:** `status`, `limit`
+
+---
+
+### Episodic Memory (Bộ nhớ theo tập)
+
+Tóm tắt cuộc trò chuyện theo session người dùng cho ngữ cảnh dài hạn.
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `GET` | `/v1/agents/{agentID}/episodic` | Liệt kê tóm tắt episodic |
+| `POST` | `/v1/agents/{agentID}/episodic/search` | Tìm kiếm hybrid BM25+vector trên episodic |
+
+**Query params:** `user_id`, `limit` (mặc định: 20, tối đa: 500), `offset`
+
+**Body tìm kiếm:** `{ "query": "...", "user_id": "tùy chọn", "max_results": 10, "min_score": 0.5 }`
+
+---
+
+### Knowledge Vault (Kho kiến thức)
+
+Lưu trữ tài liệu bền vững với embedding vector và liên kết đồ thị.
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `GET` | `/v1/vault/documents` | Liệt kê tài liệu toàn hệ thống |
+| `GET` | `/v1/vault/documents/{docID}` | Lấy một vault document cross-agent theo ID |
+| `GET` | `/v1/vault/documents/{docID}/links` | Lấy outlink, backlink và tên document đích |
+| `GET` | `/v1/vault/tree` | Cấu trúc cây phân cấp của vault document |
+| `GET` | `/v1/vault/graph` | Dữ liệu đồ thị vault để trực quan hóa (cross-tenant, giới hạn 2000 node) |
+| `POST` | `/v1/vault/enrichment/stop` | Dừng enrichment worker cho agent hiện tại |
+| `GET` | `/v1/agents/{agentID}/vault/documents` | Liệt kê tài liệu của agent |
+| `GET` | `/v1/agents/{agentID}/vault/documents/{docID}` | Lấy một tài liệu (nội dung đầy đủ) |
+| `POST` | `/v1/agents/{agentID}/vault/search` | Tìm kiếm hybrid FTS+vector |
+| `GET` | `/v1/agents/{agentID}/vault/documents/{docID}/links` | Lấy outlink và backlink của tài liệu |
+
+**Response dạng danh sách:** `{ "documents": [...], "total": 42 }`
+
+Response document object có thêm field `chat_id` (nullable string, thêm trong v3.11.0): scope chat cụ thể — `null` nghĩa là không scope theo chat. `GET /v1/vault/documents/{docID}` trả về một document object được scope theo tenant; với team document, caller không phải owner còn phải là thành viên của team.
+
+**Response links** (`GET /v1/vault/documents/{docID}/links`):
+
+```json
+{
+  "outlinks": [
+    {
+      "id": "link-uuid",
+      "from_doc_id": "source-doc-uuid",
+      "to_doc_id": "target-doc-uuid",
+      "link_type": "reference",
+      "context": "Xem hướng dẫn triển khai",
+      "metadata": {"source": "manual"},
+      "created_at": "2026-08-09T10:00:00Z"
+    }
+  ],
+  "backlinks": [
+    {
+      "from_doc_id": "other-doc-uuid",
+      "context": "Được tham chiếu từ runbook",
+      "title": "Operations runbook",
+      "path": "docs/runbook.md",
+      "team_id": "team-uuid"
+    }
+  ],
+  "doc_names": {
+    "target-doc-uuid": "Deployment guide"
+  }
+}
+```
+
+`outlinks` chứa đầy đủ link record. `backlinks` chứa metadata của document nguồn (`from_doc_id`, `context`, `title`, `path`, và `team_id` tùy chọn). `doc_names` map ID document đích của từng outlink sang title, fallback về basename của path. Khi không có kết quả, API trả mảng rỗng; backlink của caller không phải owner được lọc theo team boundary của document đích.
+
+**Body tìm kiếm:** `{ "query": "...", "scope": "team", "doc_types": ["guide"], "max_results": 10 }`
+
+---
+
+### Orchestration (Điều phối)
+
+Kiểm soát cách agent định tuyến yêu cầu.
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `GET` | `/v1/agents/{agentID}/orchestration` | Lấy mode và target điều phối hiện tại |
+
+**Giá trị mode:** `standalone` (trực tiếp), `delegate` (qua agent link), `team` (qua hệ thống task team)
+
+---
+
+### V3 Feature Flags
+
+Các cờ tính năng theo từng agent kiểm soát các hệ thống con v3.
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `GET` | `/v1/agents/{agentID}/v3-flags` | Lấy tất cả v3 flag của agent |
+| `PATCH` | `/v1/agents/{agentID}/v3-flags` | Cập nhật flag (chấp nhận partial update) |
+
+**Các flag:** `evolution_enabled`, `episodic_enabled`, `vault_enabled`, `orchestration_enabled`, `skill_evolve`, `self_evolve`
+
+---
+
+## Knowledge Graph
+
+Đồ thị entity-relation per-agent.
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `GET` | `/v1/agents/{agentID}/kg/entities` | Liệt kê/tìm kiếm entity (BM25) |
+| `GET` | `/v1/agents/{agentID}/kg/entities/{entityID}` | Lấy entity kèm relation |
+| `POST` | `/v1/agents/{agentID}/kg/entities` | Upsert entity |
+| `DELETE` | `/v1/agents/{agentID}/kg/entities/{entityID}` | Xóa entity |
+| `POST` | `/v1/agents/{agentID}/kg/traverse` | Duyệt đồ thị (tối đa độ sâu 3) |
+| `POST` | `/v1/agents/{agentID}/kg/extract` | Trích xuất entity bằng LLM |
+| `GET` | `/v1/agents/{agentID}/kg/stats` | Thống kê knowledge graph |
+| `GET` | `/v1/agents/{agentID}/kg/graph` | Toàn bộ đồ thị để trực quan hóa |
+| `GET` | `/v1/agents/{agentID}/kg/graph/compact` | Biểu diễn đồ thị rút gọn (payload nhẹ hơn full graph) |
+| `POST` | `/v1/agents/{agentID}/kg/dedup/scan` | Quét tìm entity trùng lặp |
+| `GET` | `/v1/agents/{agentID}/kg/dedup` | Liệt kê ứng viên dedup |
+| `POST` | `/v1/agents/{agentID}/kg/merge` | Gộp entity trùng lặp |
+| `POST` | `/v1/agents/{agentID}/kg/dedup/dismiss` | Bỏ qua ứng viên dedup |
+
+---
+
+## Traces
+
+### `GET /v1/traces`
+
+Liệt kê LLM traces.
+
+```bash
+curl "http://localhost:18790/v1/traces?agentId=UUID&q=timeout&min_input_tokens=1000&limit=50" \
+  -H "Authorization: Bearer TOKEN"
+```
+
+**Query param:**
+
+| Param | Kiểu | Mô tả |
+|-------|------|-------|
+| `agentId` | string | Lọc theo agent |
+| `userId` | string | Lọc theo user |
+| `status` | string | Lọc theo trạng thái |
+| `channel` | string | Lọc theo channel |
+| `q` | string | Tìm kiếm contains rộng trên các field của trace/span |
+| `min_input_tokens` / `max_input_tokens` | integer | Lọc theo khoảng input-token |
+| `min_output_tokens` / `max_output_tokens` | integer | Lọc theo khoảng output-token |
+| `tool_name` | string | Lọc các trace đã dùng một tool nhất định |
+| `min_tool_calls` / `max_tool_calls` | integer | Lọc theo khoảng số lượng tool-call |
+| `limit` | integer | Kích thước trang |
+| `offset` | integer | Offset trang |
+
+### `GET /v1/traces/follow`
+
+Poll cập nhật trace giới hạn theo một session hoặc agent — thiết kế cho view "tail" trực tiếp. Yêu cầu `session_key` **hoặc** `agent_id`. Caller không phải admin chỉ được xem trace của chính mình.
+
+```bash
+curl "http://localhost:18790/v1/traces/follow?agent_id=AGENT_UUID&since=2026-06-07T08:00:00Z" \
+  -H "Authorization: Bearer TOKEN"
+```
+
+**Query param:**
+
+| Param | Kiểu | Mô tả |
+|-------|------|-------|
+| `session_key` | string | Session cần follow (bắt buộc nếu bỏ `agent_id`) |
+| `agent_id` | string | Agent cần follow (bắt buộc nếu bỏ `session_key`) |
+| `status` | string | Lọc theo trạng thái |
+| `channel` | string | Lọc theo channel |
+| `since` | RFC 3339 | Chỉ trả về trace thay đổi sau thời điểm này |
+| `limit` | integer | Số trace tối đa (mặc định 50, tối đa 200) |
+| `include_spans` | boolean | Bao gồm chi tiết span (mặc định `false`) |
+
+### `GET /v1/traces/{traceID}`
+
+Lấy một trace cùng tất cả spans của nó.
+
+### `GET /v1/traces/{traceID}/export`
+
+Xuất cây trace dưới dạng gzipped JSON.
+
+### `GET /v1/runs/{runID}/timeline`
+
+Trả về timeline archive đã lưu trữ, an toàn để hiển thị (display-safe) của một run đơn lẻ — chính là các mục được hiển thị trong panel timeline của run/session. Các mục tool chỉ lưu preview giới hạn; raw reasoning không được lưu trữ. Caller không phải admin chỉ được xem các mục của chính mình.
+
+### Costs
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `GET` | `/v1/costs/summary` | Tóm tắt chi phí theo agent/khoảng thời gian |
+
+---
+
+## Usage & Analytics
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `GET` | `/v1/usage/timeseries` | Điểm dữ liệu usage theo thời gian |
+| `GET` | `/v1/usage/breakdown` | Phân tích theo provider/model/channel |
+| `GET` | `/v1/usage/summary` | Tóm tắt với so sánh kỳ trước |
+| `GET` | `/v1/usage/events/timeseries` | Time-series dựa trên event (tính từ raw usage event) |
+| `GET` | `/v1/usage/events/breakdown` | Phân tích dựa trên event theo provider/model/channel |
+| `GET` | `/v1/usage/events/summary` | Tóm tắt dựa trên event với so sánh kỳ trước |
+
+**Query param:** `from`, `to` (RFC 3339), `agent_id`, `provider`, `model`, `channel`, `group_by`
+
+> Các biến thể `/v1/usage/events/*` tính cùng các shape từ kho raw usage-event thay vì snapshot đã tính sẵn — hữu ích cho số liệu chính xác, cập nhật đến từng event.
+
+---
+
+## Usage Caps
+
+Policy giới hạn chi tiêu (spend-cap) khống chế lượng token và chi phí theo từng cửa sổ, tùy chọn giới hạn theo một agent, provider hoặc model cụ thể. Mọi endpoint yêu cầu **admin role**; thao tác ghi cần thêm **tenant-admin**. Policy được đánh dấu *managed* (do nền tảng cấp) không thể sửa hoặc xóa (`409`).
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `GET` | `/v1/usage-caps/policies` | Liệt kê policy spend-cap của tenant hiện tại |
+| `POST` | `/v1/usage-caps/policies` | Tạo policy |
+| `PATCH` | `/v1/usage-caps/policies/{id}` | Cập nhật một phần (mọi field tùy chọn) |
+| `DELETE` | `/v1/usage-caps/policies/{id}` | Xóa policy (`204`) |
+| `GET` | `/v1/usage-caps/utilization` | Mức sử dụng hiện tại theo từng policy |
+| `GET` | `/v1/usage-caps/events` | Cap event gần đây (throttle, vượt ngưỡng) |
+
+### `POST /v1/usage-caps/policies`
+
+```bash
+curl -X POST http://localhost:18790/v1/usage-caps/policies \
+  -H "Authorization: Bearer TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "window": "day",
+    "max_tokens": 1000000,
+    "max_cost_usd": 25.0,
+    "agent_id": null,
+    "provider_id": null,
+    "priority": 100,
+    "enabled": true
+  }'
+```
+
+| Field | Kiểu | Mô tả |
+|-------|------|-------|
+| `window` | string | Cửa sổ reset — ví dụ `day` (mặc định). Bắt buộc |
+| `max_tokens` | integer | Giới hạn token mỗi cửa sổ (tùy chọn) |
+| `max_cost_usd` | float | Giới hạn chi phí theo USD (tùy chọn; chuyển sang micros) |
+| `max_cost_micros` | integer | Giới hạn chi phí theo micro-dollar — ưu tiên hơn `max_cost_usd` (tùy chọn) |
+| `agent_id` | UUID | Giới hạn cho một agent (tùy chọn) |
+| `provider_id` | UUID | Giới hạn cho một provider (tùy chọn) |
+| `provider_type` | string | Giới hạn cho một provider type (tùy chọn) |
+| `model_id` | string | Giới hạn cho một model (tùy chọn) |
+| `priority` | integer | Độ ưu tiên đánh giá, cao chạy trước (mặc định 100) |
+| `enabled` | boolean | Mặc định `true` |
+
+Trả về `201` kèm policy đã tạo. `PATCH` nhận cùng field, đều tùy chọn — gửi `null` cho `max_tokens` / `max_cost_*` để bỏ giới hạn.
+
+**`GET /v1/usage-caps/events`** nhận `?limit=` và trả về `{ "events": [...] }`. Utilization trả về `{ "rows": [...] }`.
+
+---
+
+## Model Pricing
+
+Catalog pricing theo từng model cùng các override theo tenant, dùng để tính chi phí usage. Endpoint đọc yêu cầu **admin role**; ghi override cần **tenant-admin**; sync OpenRouter cần **master scope**.
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `GET` | `/v1/model-pricing` | Liệt kê catalog pricing |
+| `GET` | `/v1/model-pricing/overrides` | Liệt kê override pricing của tenant |
+| `PUT` | `/v1/model-pricing/overrides` | Upsert một override pricing |
+| `DELETE` | `/v1/model-pricing/overrides/{id}` | Xóa một override |
+| `POST` | `/v1/model-pricing/sync-openrouter` | Làm mới catalog từ OpenRouter (master scope) |
+
+**`GET /v1/model-pricing`** query param: `model` (lọc theo model ID), `limit` (mặc định 100). Response `{ "models": [...] }`.
+
+**`GET /v1/model-pricing/overrides`** query param: `provider_id` (UUID lọc tùy chọn). Response `{ "overrides": [...] }`.
+
+### `PUT /v1/model-pricing/overrides`
+
+```bash
+curl -X PUT http://localhost:18790/v1/model-pricing/overrides \
+  -H "Authorization: Bearer TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "provider_id": "PROVIDER_UUID",
+    "provider_type": "openai_compat",
+    "model_id": "gpt-4o",
+    "pricing": { "...": "..." },
+    "enabled": true
+  }'
+```
+
+| Field | Kiểu | Mô tả |
+|-------|------|-------|
+| `provider_id` | UUID | Bắt buộc |
+| `provider_type` | string | Provider type |
+| `model_id` | string | Bắt buộc |
+| `pricing` | object | Các field pricing (giá input/output, v.v.) |
+| `enabled` | boolean | Mặc định `true` |
+
+**`POST /v1/model-pricing/sync-openrouter`** fetch catalog OpenRouter rồi upsert. Response `{ "count": N }`. Trả về `502` nếu fetch upstream thất bại.
+
+---
+
+## Browser Cookie Sync
+
+Lưu các cookie trình duyệt được chọn để session browser phía server (ví dụ browser tool) tái sử dụng trạng thái đã đăng nhập. Mọi endpoint yêu cầu **operator role**. Cookie được giới hạn theo tenant + user (+ agent tùy chọn) và mã hóa khi lưu — phải đặt `GOCLAW_ENCRYPTION_KEY`, nếu không sync trả về `503`.
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `POST` | `/v1/browser/cookies/sync` | Upsert cookie cho scope hiện tại |
+| `GET` | `/v1/browser/cookies` | Liệt kê metadata cookie (không bao giờ trả về giá trị) |
+| `DELETE` | `/v1/browser/cookies` | Xóa cookie đã lưu trong scope hiện tại |
+
+### `POST /v1/browser/cookies/sync`
+
+```bash
+curl -X POST http://localhost:18790/v1/browser/cookies/sync \
+  -H "Authorization: Bearer TOKEN" \
+  -H "X-GoClaw-User-Id: user123" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "agent_id": "AGENT_UUID",
+    "source": "chrome-extension",
+    "cookies": [
+      {
+        "domain": "example.com",
+        "name": "session",
+        "path": "/",
+        "value": "abc123",
+        "secure": true,
+        "httpOnly": true,
+        "sameSite": "Lax",
+        "expiresAt": "2026-12-31T00:00:00Z"
+      }
+    ]
+  }'
+```
+
+| Field | Kiểu | Mô tả |
+|-------|------|-------|
+| `agent_id` | string | Scope agent tùy chọn (alias: `agent`) |
+| `source` | string | Nhãn nguồn (mặc định `chrome-extension`) |
+| `cookies` | array | Danh sách cookie. Bắt buộc, không rỗng, tối đa 200 |
+
+**Field của mỗi cookie:** `domain` (hoặc `url` để suy ra), `name`, `path`, `value` (≤ 16 KB), `secure`, `httpOnly` (alias `http_only`), `sameSite` (alias `same_site`), và một trong `expiresAt` / `expires_at` / `expirationDate` / `expiration_date`. Tổng request body giới hạn 1 MB.
+
+**Response:** `{ "synced": N }`.
+
+### `GET /v1/browser/cookies`
+
+Chỉ trả về **metadata** cookie — giá trị không bao giờ được phơi bày. Query filter tùy chọn: `agent_id`, `domain`, `name`, `path`. Response `{ "items": [ { "domain", "name", "path", "secure", "httpOnly", "sameSite", "expiresAt", "source", "updatedAt" } ] }`.
+
+### `DELETE /v1/browser/cookies`
+
+Xóa cookie trong scope hiện tại. Cùng các filter tùy chọn như endpoint list. Response `{ "deleted": N }`.
+
+---
+
+## MCP Servers
+
+### `GET /v1/mcp/servers`
+
+Liệt kê tất cả cấu hình MCP server.
+
+### `POST /v1/mcp/servers`
+
+Đăng ký MCP server.
+
+```bash
+curl -X POST http://localhost:18790/v1/mcp/servers \
+  -H "Authorization: Bearer TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "filesystem",
+    "transport": "stdio",
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+    "enabled": true
+  }'
+```
+
+Transport: `"stdio"`, `"sse"`, `"streamable-http"`.
+
+### `GET /v1/mcp/servers/{id}`
+
+Lấy MCP server.
+
+### `PUT /v1/mcp/servers/{id}`
+
+Cập nhật MCP server. Các field có thể cập nhật:
+
+| Field | Type | Mô tả |
+|-------|------|-------|
+| `name` | string | Tên hiển thị server |
+| `transport` | string | `"stdio"`, `"sse"`, `"streamable-http"` |
+| `command` | string | Lệnh chạy (stdio) |
+| `args` | string[] | Tham số lệnh |
+| `url` | string | URL server (sse/streamable-http) |
+| `api_key` | string | API key cho server |
+| `env` | object | Biến môi trường |
+| `headers` | object | HTTP headers |
+| `enabled` | boolean | Bật/tắt |
+| `tool_prefix` | string | Tiền tố cho tên tool |
+| `timeout_sec` | integer | Timeout request (giây) |
+| `agent_id` | string | Gắn với agent cụ thể |
+| `config` | object | Cấu hình bổ sung |
+| `settings` | object | Cài đặt server |
+
+### `DELETE /v1/mcp/servers/{id}`
+
+Xóa MCP server.
+
+### `POST /v1/mcp/servers/test`
+
+Test kết nối đến MCP server trước khi lưu.
+
+### `POST /v1/mcp/servers/{id}/reconnect`
+
+Buộc kết nối lại MCP server đang chạy.
+
+### `GET /v1/mcp/servers/{id}/tools`
+
+Liệt kê tool được discover từ MCP server đang chạy.
+
+### MCP Grants
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `GET` | `/v1/mcp/servers/{id}/grants` | Liệt kê grants của server |
+| `POST` | `/v1/mcp/servers/{id}/grants/agent` | Cấp server cho agent |
+| `DELETE` | `/v1/mcp/servers/{id}/grants/agent/{agentID}` | Thu hồi agent grant |
+| `GET` | `/v1/mcp/grants/agent/{agentID}` | Liệt kê tất cả grants của agent |
+| `POST` | `/v1/mcp/servers/{id}/grants/user` | Cấp server cho user |
+| `DELETE` | `/v1/mcp/servers/{id}/grants/user/{userID}` | Thu hồi user grant |
+
+### MCP Access Requests
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `POST` | `/v1/mcp/requests` | Gửi access request |
+| `GET` | `/v1/mcp/requests` | Liệt kê request đang chờ |
+| `POST` | `/v1/mcp/requests/{id}/review` | Phê duyệt hoặc từ chối request |
+
+### MCP Export / Import
+
+Xuất và nhập cấu hình MCP server và agent grant dưới dạng archive tar.gz.
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `GET` | `/v1/mcp/export/preview` | Xem trước số lượng trước khi export (không tạo archive) |
+| `GET` | `/v1/mcp/export` | Tải xuống MCP archive trực tiếp (tar.gz) |
+| `POST` | `/v1/mcp/import` | Import MCP archive (multipart field `file`) |
+
+### MCP User Credentials
+
+Lưu trữ credential per-user cho MCP server yêu cầu xác thực riêng. Request phải có user context đã xác thực. Query `?user_id=` là tùy chọn và mặc định là caller; target user khác yêu cầu quyền system admin hoặc tenant admin/owner, trong đó tenant admin/owner chỉ được target user cùng tenant.
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `PUT` | `/v1/mcp/servers/{id}/user-credentials` | Đặt hoặc thay thế credential của user |
+| `GET` | `/v1/mcp/servers/{id}/user-credentials` | Chỉ lấy metadata về việc credential có tồn tại |
+| `DELETE` | `/v1/mcp/servers/{id}/user-credentials` | Xóa credential của user |
+
+**Body PUT** (tối đa 64 KiB):
+
+```json
+{
+  "api_key": "secret",
+  "headers": {"Authorization": "Bearer secret"},
+  "env": {"MCP_TOKEN": "secret"}
+}
+```
+
+`GET` không bao giờ trả giá trị credential. Contract response đầy đủ:
+
+```json
+{
+  "user_id": "user123",
+  "has_credentials": true,
+  "has_api_key": true,
+  "has_headers": true,
+  "has_env": true
+}
+```
+
+Nếu không có credential record, cả bốn field `has_*` đều là `false`. `PUT` trả `{ "status": "updated" }`; `DELETE` trả `{ "status": "deleted" }`.
+
+Cả `PUT` và `DELETE` đều evict pooled MCP connection của user đó. MCP request tiếp theo sẽ reconnect bằng credential mới lưu (hoặc không dùng credential đã xóa), không cần restart gateway.
+
+**Query params cho export:**
+
+| Param | Kiểu | Mô tả |
+|-------|------|-------|
+| `stream` | `bool` | Khi `true`, trả SSE progress rồi event `complete` kèm `download_url` |
+
+**Archive format** (`mcp-servers-YYYYMMDD.tar.gz`):
+
+```
+servers.jsonl   — MCP server definitions
+grants.jsonl    — agent grants (server_name + agent_key)
+```
+
+**Import response** (`201 Created`):
+
+```json
+{
+  "servers_imported": 2,
+  "servers_skipped": 0,
+  "grants_applied": 4
+}
+```
+
+---
+
+## Channel Instances
+
+### `GET /v1/channels/instances`
+
+Liệt kê tất cả channel instance từ database.
+
+### `POST /v1/channels/instances`
+
+Tạo channel instance.
+
+```bash
+curl -X POST http://localhost:18790/v1/channels/instances \
+  -H "Authorization: Bearer TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "my-telegram-bot",
+    "channel_type": "telegram",
+    "agent_id": "AGENT_UUID",
+    "credentials": { "token": "BOT_TOKEN" },
+    "enabled": true
+  }'
+```
+
+**Channel được hỗ trợ:** `telegram`, `discord`, `slack`, `whatsapp`, `zalo_oa`, `zalo_personal`, `feishu`
+
+### `GET /v1/channels/instances/{id}`
+
+Lấy channel instance.
+
+### `PUT /v1/channels/instances/{id}`
+
+Cập nhật channel instance. Các field có thể cập nhật:
+
+| Field | Type | Mô tả |
+|-------|------|-------|
+| `channel_type` | string | Loại channel |
+| `credentials` | object | Thông tin xác thực channel |
+| `agent_id` | string | UUID agent gắn kết |
+| `enabled` | boolean | Bật/tắt |
+| `display_name` | string | Tên hiển thị |
+| `group_policy` | string | Chính sách tin nhắn nhóm |
+| `allow_from` | string[] | Danh sách sender ID được phép |
+| `metadata` | object | Metadata tùy chỉnh |
+| `webhook_secret` | string | Secret xác minh webhook |
+| `config` | object | Cấu hình bổ sung |
+
+### `DELETE /v1/channels/instances/{id}`
+
+Xóa channel instance.
+
+### Group Writers
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `GET` | `/v1/channels/instances/{id}/writers/groups` | Liệt kê group có quyền ghi |
+| `GET` | `/v1/channels/instances/{id}/writers` | Liệt kê writer được phép |
+| `POST` | `/v1/channels/instances/{id}/writers/test` | Kiểm tra thử một user có được phép ghi vào group không (không thay đổi dữ liệu) |
+| `POST` | `/v1/channels/instances/{id}/writers` | Thêm writer |
+| `DELETE` | `/v1/channels/instances/{id}/writers/{userId}` | Xóa writer |
+
+**`POST .../writers/test`** — kiểm tra thử quyền writer trước khi lưu. Body `{ "group_id": "...", "user_id": "..." }` (cả hai bắt buộc). Luôn trả về `200` kèm kết quả đánh giá:
+
+```json
+{
+  "allowed": true,
+  "reason": "writer",
+  "instance_id": "uuid",
+  "agent_id": "uuid",
+  "group_id": "telegram:-100123",
+  "user_id": "user123",
+  "writer_count": 3
+}
+```
+
+`reason` là một trong `writer`, `not_writer`, `no_writers_configured`, hoặc `invalid_group`.
+
+### Passive Memory Extraction
+
+Trích xuất memory thụ động theo từng channel-instance — khai thác hội thoại gần đây thành các memory candidate được đưa vào hàng đợi review, rồi duyệt chúng vào episodic memory. Endpoint đọc cho phép viewer truy cập; cấu hình settings và chuyển trạng thái item yêu cầu **tenant-admin**.
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `GET` | `/v1/channels/instances/{id}/memory-extraction` | Config + run gần nhất + số lượng pending + item gần đây |
+| `PUT` | `/v1/channels/instances/{id}/memory-extraction/settings` | Thay thế khối config `passive_memory` đã chuẩn hóa |
+| `POST` | `/v1/channels/instances/{id}/memory-extraction/run` | Kích hoạt một lần extraction thủ công |
+| `GET` | `/v1/channels/instances/{id}/memory-extraction/items` | Liệt kê item trong hàng đợi review (tùy chọn lọc `status`) |
+| `POST` | `/v1/channels/instances/{id}/memory-extraction/items/{itemID}/approve` | Ghi candidate vào episodic memory + publish event KG |
+| `POST` | `/v1/channels/instances/{id}/memory-extraction/items/{itemID}/reject` | Từ chối candidate |
+| `DELETE` | `/v1/channels/instances/{id}/memory-extraction/items/{itemID}` | Xóa candidate (và mọi episodic summary liên kết) |
+
+**Các field config `passive_memory`:** `enabled`, `review_mode`, `interval_minutes`, `message_cap`, `retention_hours`, `allowed_types`, `exclude_users`, `exclude_patterns`, `min_messages`, `group_only`. Mặc định: tắt, bật review-mode, chỉ group, interval 360 phút, cap 100 message, retention 168 giờ, và các loại bền vững (people, projects, decisions, todos, preferences, events).
+
+### Context Capability Administration
+
+Quản lý quyền truy cập tool theo từng context (theo scope) cho một channel instance. Một context được định danh bằng `{scopeType}/{scopeKey}` (ví dụ một group hoặc DM). Các route grant/credential yêu cầu **vai trò admin**; các thao tác đọc list/capabilities cho phép viewer truy cập.
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `GET` | `/v1/channels/instances/{id}/contexts` | Liệt kê context của instance |
+| `GET` | `/v1/channels/instances/{id}/contexts/{scopeType}/{scopeKey}/members` | Liệt kê thành viên của một context |
+| `GET` | `/v1/channels/instances/{id}/contexts/{scopeType}/{scopeKey}/capabilities` | Capability hiệu lực được giải quyết cho context |
+| `GET` | `/v1/channels/instances/{id}/contexts/{scopeType}/{scopeKey}/mcp-grants` | Liệt kê MCP server grant |
+| `PUT` | `/v1/channels/instances/{id}/contexts/{scopeType}/{scopeKey}/mcp-grants/{serverID}` | Đặt một MCP grant |
+| `DELETE` | `/v1/channels/instances/{id}/contexts/{scopeType}/{scopeKey}/mcp-grants/{serverID}` | Xóa một MCP grant |
+| `GET` | `/v1/channels/instances/{id}/contexts/{scopeType}/{scopeKey}/mcp-credentials` | Liệt kê MCP credential |
+| `PUT` | `/v1/channels/instances/{id}/contexts/{scopeType}/{scopeKey}/mcp-credentials/{serverID}` | Đặt một MCP credential |
+| `DELETE` | `/v1/channels/instances/{id}/contexts/{scopeType}/{scopeKey}/mcp-credentials/{serverID}` | Xóa một MCP credential |
+| `GET` | `/v1/channels/instances/{id}/contexts/{scopeType}/{scopeKey}/cli-grants` | Liệt kê CLI binary grant |
+| `PUT` | `/v1/channels/instances/{id}/contexts/{scopeType}/{scopeKey}/cli-grants/{binaryID}` | Đặt một CLI grant |
+| `DELETE` | `/v1/channels/instances/{id}/contexts/{scopeType}/{scopeKey}/cli-grants/{binaryID}` | Xóa một CLI grant |
+| `GET` | `/v1/channels/instances/{id}/contexts/{scopeType}/{scopeKey}/cli-credentials` | Liệt kê CLI credential |
+| `PUT` | `/v1/channels/instances/{id}/contexts/{scopeType}/{scopeKey}/cli-credentials/{binaryID}` | Đặt một CLI credential |
+| `DELETE` | `/v1/channels/instances/{id}/contexts/{scopeType}/{scopeKey}/cli-credentials/{binaryID}` | Xóa một CLI credential |
+
+---
+
+## Contacts
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `GET` | `/v1/contacts` | Liệt kê contact (có phân trang) |
+| `GET` | `/v1/contacts/resolve` | Resolve contact theo ID (query string `ids=` lặp lại; tối đa 100) |
+| `POST` | `/v1/contacts/merge` | Gộp các contact trùng lặp |
+| `POST` | `/v1/contacts/unmerge` | Tách các contact đã gộp |
+| `GET` | `/v1/contacts/merged/{tenantUserId}` | Liệt kê contact đã gộp của tenant user |
+
+### Tenant Users
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `GET` | `/v1/tenant-users` | Liệt kê tenant user |
+| `GET` | `/v1/users/search` | Tìm kiếm user trong các channel |
+
+---
+
+## Team Events
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `GET` | `/v1/teams/{id}/events` | Liệt kê team event (có phân trang) |
+
+### Team Workspace
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `POST` | `/v1/teams/{teamId}/workspace/upload` | Upload file vào team workspace |
+| `PUT` | `/v1/teams/{teamId}/workspace/move` | Di chuyển/đổi tên file trong team workspace |
+
+### Team Attachments
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `GET` | `/v1/teams/{teamId}/attachments/{attachmentId}/download` | Tải xuống task attachment |
+
+---
+
+## Team Export / Import
+
+Xuất và nhập toàn bộ team (metadata team + tất cả agent thành viên) dưới dạng archive tar.gz.
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `GET` | `/v1/teams/{id}/export/preview` | Xem trước số lượng (members, tasks, agent_links) không tạo archive |
+| `GET` | `/v1/teams/{id}/export` | Tải xuống team archive trực tiếp (tar.gz) |
+| `POST` | `/v1/teams/import` | Import team archive, tạo agent mới và kết nối team (multipart field `file`) |
+
+**Export query params:**
+
+| Param | Kiểu | Mô tả |
+|-------|------|-------|
+| `stream` | `bool` | Khi `true`, trả SSE progress rồi event `complete` kèm `download_url` |
+
+**Archive format** (`team-{name}-YYYYMMDD.tar.gz`):
+
+```
+manifest.json                          — archive manifest (team_name, agent_keys, sections)
+team/team.json                         — team metadata
+team/members.jsonl                     — team member records
+team/tasks.jsonl                       — team task records
+team/comments.jsonl                    — task comments
+team/events.jsonl                      — task events
+team/links.jsonl                       — agent link records
+team/workspace/                        — team workspace files
+agents/{agent_key}/agent.json          — per-agent config
+agents/{agent_key}/context_files/      — per-agent context files
+agents/{agent_key}/memory/             — per-agent memory documents
+agents/{agent_key}/knowledge_graph/    — per-agent KG entities + relations
+agents/{agent_key}/cron/               — per-agent cron jobs
+agents/{agent_key}/workspace/          — per-agent workspace files
+```
+
+**Import response** (`201 Created`):
+
+```json
+{
+  "team_name": "research-team",
+  "agents_added": 3,
+  "agent_keys": ["researcher", "writer", "reviewer"]
+}
+```
+
+> Import yêu cầu **quyền admin**. Agent key trùng sẽ được đổi tên tự động (hậu tố `-2`, `-3`, …). Cron job luôn được import ở trạng thái disabled.
+
+Endpoint tải xuống dùng chung (dùng chung với token export agent):
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `GET` | `/v1/export/download/{token}` | Tải archive qua token ngắn hạn (hết hạn 5 phút, dùng chung cho mọi loại export) |
+
+---
+
+## Pending Messages
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `GET` | `/v1/pending-messages` | Liệt kê tất cả group kèm tiêu đề |
+| `GET` | `/v1/pending-messages/messages` | Liệt kê message theo channel+key |
+| `DELETE` | `/v1/pending-messages` | Xóa message group |
+| `POST` | `/v1/pending-messages/compact` | Tóm tắt bằng LLM (async, 202) |
+
+---
+
+## Secure CLI Credentials
+
+Yêu cầu **admin role** (full gateway token hoặc gateway token rỗng ở chế độ dev/single-user).
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `GET` | `/v1/cli-credentials` | Liệt kê tất cả credential |
+| `POST` | `/v1/cli-credentials` | Tạo credential mới |
+| `GET` | `/v1/cli-credentials/{id}` | Lấy chi tiết credential |
+| `PUT` | `/v1/cli-credentials/{id}` | Cập nhật credential |
+| `DELETE` | `/v1/cli-credentials/{id}` | Xóa credential |
+| `GET` | `/v1/cli-credentials/presets` | Lấy preset credential template |
+| `POST` | `/v1/cli-credentials/{id}/test` | Test kết nối credential (dry-run) |
+| `POST` | `/v1/cli-credentials/check-binary` | Xác thực đường dẫn binary cho CLI credential |
+
+### Per-User CLI Credentials
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `GET` | `/v1/cli-credentials/{id}/user-credentials` | Liệt kê user credential cho một CLI config |
+| `GET` | `/v1/cli-credentials/{id}/user-credentials/{userId}` | Lấy credential của user cụ thể |
+| `PUT` | `/v1/cli-credentials/{id}/user-credentials/{userId}` | Đặt credential của user cụ thể |
+| `DELETE` | `/v1/cli-credentials/{id}/user-credentials/{userId}` | Xóa credential của user cụ thể |
+
+### Per-Agent CLI Credentials
+
+Lưu trữ credential theo từng agent cho một CLI config — lưu các giá trị credential mà một agent cụ thể nên dùng. Đây là phần **khác biệt với [CLI Credential Agent Grants](#cli-credential-agent-grants)** bên dưới: grant kiểm soát *liệu* một agent có được phép dùng một binary hay không (kèm giới hạn arg/timeout), còn các endpoint này lưu payload credential thực tế của agent.
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `GET` | `/v1/cli-credentials/{id}/agent-credentials` | Liệt kê credential theo agent cho một CLI config |
+| `GET` | `/v1/cli-credentials/{id}/agent-credentials/{agentId}` | Lấy metadata credential của agent |
+| `PUT` | `/v1/cli-credentials/{id}/agent-credentials/{agentId}` | Tạo hoặc thay thế credential của một agent |
+| `DELETE` | `/v1/cli-credentials/{id}/agent-credentials/{agentId}` | Xóa credential của một agent |
+
+### CLI Credential Agent Grants
+
+Per-agent binary grants — kiểm soát agent nào được phép dùng một CLI credential binary cụ thể, với các giới hạn tùy chọn về đối số, verbose output, và timeout. Yêu cầu **admin role**.
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `GET` | `/v1/cli-credentials/{id}/agent-grants` | Liệt kê tất cả agent grant cho một credential |
+| `POST` | `/v1/cli-credentials/{id}/agent-grants` | Tạo agent grant |
+| `GET` | `/v1/cli-credentials/{id}/agent-grants/{grantId}` | Lấy thông tin một grant cụ thể |
+| `PUT` | `/v1/cli-credentials/{id}/agent-grants/{grantId}` | Cập nhật grant |
+| `DELETE` | `/v1/cli-credentials/{id}/agent-grants/{grantId}` | Xóa grant |
+| `POST` | `/v1/cli-credentials/{id}/agent-grants/{grantId}/env:reveal` | Tiết lộ env vars đã giải mã cho grant (rate-limited; không bao giờ cache — POST được chọn thay vì GET để tránh CSRF) |
+
+**Trường khi tạo/cập nhật grant:**
+
+| Field | Type | Mô tả |
+|-------|------|-------|
+| `agent_id` | UUID | Agent được cấp quyền truy cập (bắt buộc khi tạo) |
+| `env_vars` | object | Ghi đè env var per-grant (plaintext khi nhập; mã hóa lúc lưu qua `GOCLAW_ENCRYPTION_KEY`; chỉ trả về tên key trong list/get) |
+| `deny_args` | JSON | Giới hạn đối số (tùy chọn) |
+| `deny_verbose` | JSON | Giới hạn verbose output (tùy chọn) |
+| `timeout_seconds` | integer | Ghi đè timeout thực thi cho agent (tùy chọn) |
+| `tips` | string | Gợi ý sử dụng cho agent (tùy chọn) |
+| `enabled` | boolean | Bật/tắt grant (mặc định: `true`) |
+
+**Response khi tạo** (`201 Created`): đối tượng grant vừa tạo (không có giá trị env plaintext — chỉ trả `env_keys` + `env_set`).
+
+> **`env:reveal`** trả về plaintext đã giải mã cho env vars của grant. Endpoint bị rate-limit theo credential (cấu hình RPM + burst) và được ghi log. Yêu cầu đặt `GOCLAW_ENCRYPTION_KEY`; nếu không có thì grant lưu env chưa mã hóa trên disk chỉ khi cấu hình tường minh.
+
+Thay đổi grant sẽ phát sự kiện `cache_invalidate` trên message bus để các agent đang kết nối cập nhật ngay lập tức.
+
+---
+
+## Text-to-Speech (TTS)
+
+Tổng hợp giọng nói và cấu hình TTS per-tenant. Các endpoint synthesis/test yêu cầu `RoleOperator`; endpoint config yêu cầu `RoleAdmin`.
+
+### `POST /v1/tts/synthesize`
+
+Chuyển văn bản thành audio bằng TTS provider đã cấu hình.
+
+**Request body:**
+
+```json
+{
+  "text": "Xin chào!",
+  "provider": "openai",
+  "voice_id": "alloy",
+  "model_id": "tts-1"
+}
+```
+
+| Field | Type | Mô tả |
+|-------|------|-------|
+| `text` | string | Văn bản cần tổng hợp. Bắt buộc. Tối đa 500 ký tự. |
+| `provider` | string | Ghi đè provider (`openai`, `elevenlabs`, `minimax`, `edge`, `gemini`). Tùy chọn — mặc định dùng provider cấu hình của tenant. |
+| `voice_id` | string | ID giọng nói. Tùy chọn. |
+| `model_id` | string | ID model. Tùy chọn. |
+
+**Response:** Bytes audio thô với `Content-Type` khớp MIME type của provider (ví dụ: `audio/mpeg`).
+
+**Lỗi:** `400` văn bản rỗng hoặc quá giới hạn · `404` chưa cấu hình provider · `422` model hoặc params không hợp lệ · `429` rate limit · `504` timeout tổng hợp
+
+### `POST /v1/tts/test-connection`
+
+Kiểm tra kết nối đến TTS provider bằng credentials cung cấp (không lưu cấu hình). Truyền `"***"` làm `api_key` để kiểm tra lại key đã lưu mà không cần nhập lại.
+
+**Request body:**
+
+```json
+{
+  "provider": "openai",
+  "api_key": "sk-...",
+  "api_base": "",
+  "voice_id": "alloy",
+  "model_id": "tts-1",
+  "group_id": "",
+  "timeout_ms": 10000
+}
+```
+
+| Field | Type | Mô tả |
+|-------|------|-------|
+| `provider` | string | Bắt buộc. Một trong: `openai`, `elevenlabs`, `minimax`, `edge`, `gemini`. |
+| `api_key` | string | API key. Bắt buộc với mọi provider trừ `edge`. Dùng `"***"` để tái sử dụng key đã lưu. |
+| `api_base` | string | URL API tùy chỉnh. Tùy chọn. |
+| `voice_id` | string | ID giọng nói. Tùy chọn. |
+| `model_id` | string | ID model. Tùy chọn. |
+| `group_id` | string | Group ID của MiniMax. Bắt buộc với `minimax`. |
+| `rate` | string | Tốc độ giọng đọc (chỉ Edge TTS). Tùy chọn. |
+| `timeout_ms` | integer | Timeout yêu cầu tính bằng ms. Tùy chọn (mặc định: 10 000). |
+| `params` | object | Blob params riêng theo provider. Tùy chọn. |
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "provider": "openai",
+  "latency_ms": 312
+}
+```
+
+Khi thất bại: `{"success": false, "error": "..."}`
+
+**Lỗi:** `400` thiếu field bắt buộc · `422` voice/model/params không hợp lệ · `504` test timeout · `502` lỗi upstream
+
+### `GET /v1/tts/capabilities`
+
+Trả về catalog metadata tĩnh cho tất cả TTS provider — độc lập với provider nào đang được cấu hình. Dùng để render form cài đặt params theo provider trước khi lưu credentials.
+
+**Response:**
+
+```json
+{
+  "providers": [
+    {
+      "provider": "openai",
+      "models": ["tts-1", "tts-1-hd"],
+      "params": [
+        { "key": "speed", "type": "float", "min": 0.25, "max": 4.0, "default": 1.0 }
+      ]
+    },
+    ...
+  ]
+}
+```
+
+Mỗi phần tử trong `params` gồm: `key`, `type` (`string`|`float`|`int`|`bool`|`enum`), tùy chọn `min`/`max`/`default`/`enum_values`, và điều kiện `depends_on`.
+
+**Auth:** `RoleOperator`
+
+### `GET /v1/tts/config`
+
+Trả về cấu hình TTS của tenant hiện tại. API key được che dưới dạng `"***"`. Yêu cầu `RoleAdmin` và tenant context hợp lệ.
+
+**Response:**
+
+```json
+{
+  "provider": "openai",
+  "auto": "off",
+  "mode": "final",
+  "max_length": 1500,
+  "timeout_ms": 30000,
+  "openai": { "api_key": "***", "api_base": "", "voice": "alloy", "model": "tts-1" },
+  "elevenlabs": { "api_key": "***", "voice_id": "", "model_id": "" },
+  "edge": { "voice_id": "", "rate": "" },
+  "minimax": { "api_key": "***", "group_id": "", "voice_id": "", "model_id": "" },
+  "gemini": { "api_key": "***", "voice_id": "", "model_id": "" }
+}
+```
+
+### `POST /v1/tts/config`
+
+Lưu cấu hình TTS cho tenant hiện tại. Yêu cầu `RoleAdmin`.
+
+**Request body:**
+
+```json
+{
+  "provider": "openai",
+  "auto": "off",
+  "mode": "final",
+  "max_length": 1500,
+  "timeout_ms": 30000,
+  "openai": {
+    "api_key": "sk-...",
+    "api_base": "",
+    "voice": "alloy",
+    "model": "tts-1",
+    "params": {}
+  },
+  "gemini": {
+    "api_key": "...",
+    "voice_id": "Aoede",
+    "model_id": "gemini-2.5-flash-preview-tts",
+    "speakers": "[{\"name\":\"Speaker1\",\"voice\":\"Aoede\"}]"
+  }
+}
+```
+
+| Field | Type | Mô tả |
+|-------|------|-------|
+| `provider` | string | Slug TTS provider đang dùng. |
+| `auto` | string | Chế độ tự động: `off`, `final`, `all`. |
+| `mode` | string | Trigger tổng hợp: `final` (cuối lượt) hoặc `chunk` (streaming). |
+| `max_length` | integer | Số ký tự tối đa mỗi lần tổng hợp. |
+| `timeout_ms` | integer | Timeout yêu cầu provider tính bằng ms. |
+| `{provider}` | object | Cấu hình theo provider. `api_key: "***"` giữ nguyên key đã lưu. |
+| `{provider}.params` | object | Blob params riêng của provider (được validate theo capability schema). |
+| `gemini.speakers` | string | JSON-encoded `[]SpeakerVoice` cho chế độ multi-speaker Gemini. |
+
+**Response:** `{ "ok": true }`
+
+---
+
+## Giọng nói (Voices)
+
+Danh sách giọng nói với cache theo tenant. Hỗ trợ ElevenLabs và MiniMax. Yêu cầu đã cấu hình API key của provider tương ứng trong cài đặt TTS.
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `GET` | `/v1/voices` | Liệt kê giọng nói có sẵn (phục vụ từ cache; tự động fetch live khi cache miss) |
+| `POST` | `/v1/voices/refresh` | Xóa cache giọng nói và fetch lại. Yêu cầu quyền admin. |
+
+**Query params (`GET /v1/voices`):**
+
+| Param | Type | Mô tả |
+|-------|------|-------|
+| `provider` | string | Provider giọng nói: `elevenlabs` (mặc định) hoặc `minimax`. |
+
+**Response của `GET /v1/voices`:**
+
+```json
+{
+  "voices": [
+    { "voice_id": "21m00Tcm4TlvDq8ikWAM", "name": "Rachel", "preview_url": "https://..." },
+    ...
+  ]
+}
+```
+
+Trả về `404` khi chưa cấu hình API key cho provider yêu cầu. Trả về `502` khi lệnh gọi API thất bại.
+
+---
+
+## Runtime & Packages
+
+Quản lý package system (apk), Python (pip), và Node (npm). Yêu cầu authentication.
+
+### `GET /v1/packages`
+
+Liệt kê tất cả package đã cài, nhóm theo category (system, pip, npm).
+
+### `POST /v1/packages/install`
+
+```json
+{ "package": "github-cli" }
+```
+
+Dùng prefix `"pip:pandas"` hoặc `"npm:typescript"` để chỉ định package manager. Không có prefix thì mặc định là system (apk).
+
+### `POST /v1/packages/uninstall`
+
+Cùng format với install.
+
+### `GET /v1/packages/runtimes`
+
+Kiểm tra Python và Node runtime có sẵn hay không.
+
+```json
+{ "python": true, "node": true }
+```
+
+### `GET /v1/packages/github-releases`
+
+Liệt kê GitHub release của một repository (dùng cho giao diện chọn package). Auth: viewer+.
+
+**Query params:**
+
+| Param | Type | Mô tả |
+|-------|------|-------|
+| `repo` | string | Repository theo dạng `owner/repo`. Bắt buộc. |
+| `limit` | integer | Số release tối đa trả về (1–50, mặc định 10). |
+
+**Response:**
+
+```json
+{
+  "releases": [
+    {
+      "tag": "v2.40.1",
+      "name": "GitHub CLI 2.40.1",
+      "published_at": "2024-01-15T12:00:00Z",
+      "prerelease": false,
+      "matching_assets": [{ "name": "gh_2.40.1_linux_amd64.tar.gz", "size_bytes": 10485760 }],
+      "all_assets_count": 12
+    }
+  ]
+}
+```
+
+`matching_assets` chứa asset phù hợp OS/arch của server (rỗng nếu không có). Release draft bị loại trừ.
+
+### Cập nhật Package
+
+Theo dõi và áp dụng cập nhật package từ các registry system / pip / npm. Đọc yêu cầu viewer+; ghi yêu cầu admin.
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `GET` | `/v1/packages/updates` | Liệt kê các bản cập nhật đang chờ từ mỗi registry |
+| `POST` | `/v1/packages/updates/refresh` | Buộc làm mới cache registry cập nhật |
+| `POST` | `/v1/packages/update` | Áp dụng một bản cập nhật — body `{ "package": "pip:pandas" }` |
+| `POST` | `/v1/packages/updates/apply-all` | Áp dụng toàn bộ bản cập nhật đang chờ (chạy lâu; trả SSE progress khi `?stream=true`) |
+
+Cập nhật phát sự kiện `cache_invalidate` trên bus để client đang kết nối làm mới danh sách package.
+
+### `GET /v1/shell-deny-groups`
+
+Liệt kê các nhóm lệnh shell bị từ chối (chính sách bảo mật).
+
+---
+
+## Storage
+
+Quản lý file workspace.
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `GET` | `/v1/storage/files` | Liệt kê file với giới hạn độ sâu |
+| `GET` | `/v1/storage/files/{path...}` | Đọc file (JSON hoặc raw) |
+| `POST` | `/v1/storage/files` | Upload file vào workspace (admin) |
+| `DELETE` | `/v1/storage/files/{path...}` | Xóa file/thư mục |
+| `PUT` | `/v1/storage/move` | Di chuyển/đổi tên file hoặc thư mục (admin) |
+| `GET` | `/v1/storage/size` | Stream kích thước storage (SSE, cache 60 phút) |
+
+`?raw=true` — serve MIME type gốc. `?depth=N` — giới hạn độ sâu traversal.
+
+---
+
+## Media
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `POST` | `/v1/media/upload` | Upload file (multipart, tối đa 50 MB) |
+| `GET` | `/v1/media/{id}` | Serve media theo ID kèm cache |
+
+Auth qua Bearer token hoặc query param `?token=` (dùng cho tag `<img>` và `<audio>`).
+
+---
+
+## Files
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `GET` | `/v1/files/{path...}` | Serve workspace file theo path |
+| `POST` | `/v1/files/sign` | Tạo signed URL để truy cập file |
+
+**Query parameters:**
+
+| Param | Type | Mô tả |
+|-------|------|-------|
+| `download` | `bool` | Khi `true`, ép `Content-Disposition: attachment` (tải về thay vì hiển thị inline) |
+
+---
+
+## API Keys
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `GET` | `/v1/api-keys` | Liệt kê tất cả API key (đã che) |
+| `POST` | `/v1/api-keys` | Tạo API key (trả về key thô một lần) |
+| `POST` | `/v1/api-keys/{id}/revoke` | Thu hồi API key |
+
+### Create Request
+
+```json
+{
+  "name": "ci-deploy",
+  "scopes": ["operator.read", "operator.write"],
+  "expires_in": 2592000
+}
+```
+
+Field `key` chỉ được trả về trong response tạo mới. Các lần gọi sau chỉ hiển thị `prefix`.
+
+---
+
+## OAuth
+
+### Per-Provider ChatGPT/Codex OAuth
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `GET` | `/v1/auth/chatgpt/{provider}/status` | Kiểm tra trạng thái OAuth của provider |
+| `GET` | `/v1/auth/chatgpt/{provider}/quota` | Lấy trạng thái quota Codex/OpenAI |
+| `POST` | `/v1/auth/chatgpt/{provider}/start` | Bắt đầu OAuth flow cho provider |
+| `POST` | `/v1/auth/chatgpt/{provider}/callback` | Xử lý callback thủ công |
+| `POST` | `/v1/auth/chatgpt/{provider}/logout` | Thu hồi OAuth token của provider |
+
+### Legacy OpenAI Aliases
+
+Alias tương thích cho provider mặc định `openai-codex`:
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `GET` | `/v1/auth/openai/status` | Kiểm tra trạng thái OpenAI OAuth |
+| `GET` | `/v1/auth/openai/quota` | Lấy trạng thái quota |
+| `POST` | `/v1/auth/openai/start` | Khởi động OAuth flow |
+| `POST` | `/v1/auth/openai/callback` | Xử lý OAuth callback thủ công |
+| `POST` | `/v1/auth/openai/logout` | Xóa OAuth token đã lưu |
+
+---
+
+## Tenants
+
+Quản lý multi-tenant (chỉ gateway token scope).
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `GET` | `/v1/tenants` | Liệt kê tenant |
+| `POST` | `/v1/tenants` | Tạo tenant |
+| `GET` | `/v1/tenants/{id}` | Lấy tenant |
+| `PATCH` | `/v1/tenants/{id}` | Cập nhật tenant |
+| `GET` | `/v1/tenants/{id}/users` | Liệt kê user trong tenant |
+| `POST` | `/v1/tenants/{id}/users` | Thêm user vào tenant |
+| `DELETE` | `/v1/tenants/{id}/users/{userId}` | Xóa user khỏi tenant |
+
+---
+
+## Backup & Restore
+
+### System Backup (Admin)
+
+Backup toàn hệ thống để phục hồi sau sự cố. Yêu cầu quyền admin.
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `POST` | `/v1/system/backup` | Kích hoạt backup hệ thống (trả về archive hoặc SSE progress) |
+| `GET` | `/v1/system/backup/preflight` | Kiểm tra điều kiện trước khi backup |
+| `GET` | `/v1/system/backup/download/{token}` | Tải archive backup theo token ngắn hạn |
+
+### System Restore (Admin)
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `POST` | `/v1/system/restore` | Khôi phục tenant/hệ thống từ archive backup. Yêu cầu quyền admin. |
+
+### System Backup S3
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `GET` | `/v1/system/backup/s3/config` | Lấy cấu hình S3 backup |
+| `PUT` | `/v1/system/backup/s3/config` | Cập nhật cấu hình S3 backup |
+| `GET` | `/v1/system/backup/s3/list` | Liệt kê các backup có trên S3 |
+| `POST` | `/v1/system/backup/s3/upload` | Upload backup lên S3 |
+| `POST` | `/v1/system/backup/s3/backup` | Kích hoạt backup trực tiếp lên S3 |
+
+### Tenant Backup
+
+Backup và khôi phục theo tenant. Yêu cầu quyền admin.
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `POST` | `/v1/tenant/backup` | Kích hoạt backup tenant |
+| `GET` | `/v1/tenant/backup/preflight` | Kiểm tra điều kiện trước khi backup tenant |
+| `GET` | `/v1/tenant/backup/download/{token}` | Tải archive backup tenant theo token ngắn hạn |
+| `POST` | `/v1/tenant/restore` | Khôi phục tenant từ archive backup |
+
+---
+
+## Activity & Audit
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `GET` | `/v1/activity` | Liệt kê activity audit log (có thể filter) |
+| `GET` | `/v1/activity/aggregate` | Đếm activity tổng hợp, nhóm theo một chiều (dimension) |
+
+### `GET /v1/activity/aggregate`
+
+Trả về số đếm activity nhóm theo một chiều thay vì các dòng thô. Caller không phải admin bị giới hạn theo actor ID của chính mình; nhóm theo `actor_id` yêu cầu admin role.
+
+**Query param:**
+
+| Param | Kiểu | Mô tả |
+|-------|------|-------|
+| `group_by` | string | Chiều nhóm — ví dụ `action`, `entity_type`, `actor_type`, `actor_id` (chỉ admin) |
+| `actor_type` | string | Lọc theo actor type |
+| `actor_id` | string | Lọc theo actor ID |
+| `action` | string | Lọc theo action |
+| `entity_type` | string | Lọc theo entity type |
+| `entity_id` | string | Lọc theo entity ID |
+| `from` | RFC 3339 | Đầu cửa sổ thời gian |
+| `to` | RFC 3339 | Cuối cửa sổ thời gian (phải sau `from`) |
+| `limit` | integer | Số nhóm tối đa trả về |
+
+---
+
+## Runtime Logs
+
+View tổng hợp của buffer runtime log trong bộ nhớ. Yêu cầu **admin role**.
+
+### `GET /v1/logs/runtime/aggregate`
+
+Trả về số đếm runtime log nhóm theo `level` hoặc `source`.
+
+```bash
+curl "http://localhost:18790/v1/logs/runtime/aggregate?group_by=level" \
+  -H "Authorization: Bearer TOKEN"
+```
+
+**Query param:**
+
+| Param | Kiểu | Mô tả |
+|-------|------|-------|
+| `group_by` | string | `level` (mặc định) hoặc `source` |
+| `level` | string | Lọc theo log level |
+| `source` | string | Lọc theo log source |
+| `from` | RFC 3339 | Chỉ đếm entry sau thời điểm này |
+
+> Tail log server trực tiếp có sẵn qua WebSocket bằng `logs.tail` — xem [WebSocket Protocol](/websocket-protocol#logs).
+
+---
+
+## System Configs
+
+Kho cấu hình key-value theo tenant. Đọc cho tất cả user đã xác thực; ghi yêu cầu quyền admin.
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `GET` | `/v1/system-configs` | Liệt kê config cho tenant hiện tại |
+| `GET` | `/v1/system-configs/{key}` | Lấy giá trị config theo key |
+| `PUT` | `/v1/system-configs/{key}` | Đặt giá trị config (chỉ admin) |
+| `DELETE` | `/v1/system-configs/{key}` | Xóa config entry (chỉ admin) |
+
+---
+
+## Edition
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `GET` | `/v1/edition` | Lấy thông tin edition hiện tại và giới hạn tính năng |
+
+---
+
+## Workstations
+
+> **Chỉ bản Standard edition.** Gateway trả `403` trên Lite. Yêu cầu admin role.
+
+Workstation là các remote execution endpoint (SSH hoặc Docker) mà agent có thể dùng để thực thi lệnh trong môi trường sandbox. Mỗi workstation có danh sách cho phép (allowlist) các mẫu lệnh được phép và audit log tamper-evident.
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `GET` | `/v1/workstations` | Liệt kê workstation cho tenant hiện tại |
+| `POST` | `/v1/workstations` | Tạo workstation |
+| `GET` | `/v1/workstations/{id}` | Lấy thông tin workstation theo ID |
+| `PUT` | `/v1/workstations/{id}` | Cập nhật workstation |
+| `DELETE` | `/v1/workstations/{id}` | Xóa workstation |
+| `POST` | `/v1/workstations/{id}/test` | Kiểm tra kết nối (SSH probe hoặc `docker ps`) — không thực thi lệnh |
+| `GET` | `/v1/workstations/{id}/permissions` | Liệt kê các mẫu allowlist |
+| `POST` | `/v1/workstations/{id}/permissions` | Thêm mẫu allowlist |
+| `DELETE` | `/v1/workstations/{id}/permissions/{permId}` | Xóa một mẫu |
+| `PUT` | `/v1/workstations/{id}/permissions/{permId}/toggle` | Bật/tắt mẫu mà không xóa |
+| `GET` | `/v1/workstations/{id}/activity` | Liệt kê các mục audit (có thể lọc, phân trang) |
+
+**Body khi tạo:**
+
+```json
+{
+  "workstation_key": "build-host",
+  "name": "Build host",
+  "backend_type": "ssh",
+  "metadata": {
+    "host": "build.internal",
+    "port": 22,
+    "user": "claw",
+    "private_key_ref": "kms://..."
+  },
+  "default_cwd": "/srv/builds",
+  "default_env": {"PATH": "/usr/local/bin:/usr/bin"}
+}
+```
+
+| Field | Type | Mô tả |
+|-------|------|-------|
+| `workstation_key` | string | Key ổn định phía client — duy nhất theo tenant |
+| `name` | string | Tên hiển thị |
+| `backend_type` | enum | `ssh` hoặc `docker` (ràng buộc CHECK trong DB) |
+| `metadata` | object | Cấu hình kết nối theo backend — mã hóa lúc lưu |
+| `default_cwd` | string | Thư mục làm việc mặc định cho các lần gọi exec |
+| `default_env` | object | Env var được merge vào mọi exec — mã hóa lúc lưu |
+| `active` | boolean | Workstation có thể chọn để liên kết với agent |
+
+**Mục log hoạt động:**
+
+| Field | Type | Mô tả |
+|-------|------|-------|
+| `action` | enum | `exec` (đã chạy) hoặc `deny` (bị allowlist từ chối) |
+| `cmd_hash` | string | SHA-256 của toàn bộ dòng lệnh |
+| `cmd_preview` | string | 200 byte đầu của lệnh (cắt bớt, không có secret) |
+| `exit_code` | integer | Exit code của tiến trình (null nếu `deny`) |
+| `duration_ms` | integer | Thời gian thực tế (null nếu `deny`) |
+| `agent_id` | UUID | Agent đã khởi tạo lệnh gọi |
+
+> Các backend workstation dùng chung rate limit theo tenant và tuân theo danh sách shell deny-groups toàn cục.
+
+---
+
+## Webhooks
+
+Hai bề mặt:
+
+1. **Inbound webhook endpoints** — nhận request có chữ ký HMAC từ hệ thống bên ngoài và định tuyến qua agent hoặc channel. Không cần bearer token; xác thực qua `X-GoClaw-Signature` (HMAC-SHA256) + IP allowlist + tùy chọn gate `localhost_only`.
+2. **Quản trị webhook** — CRUD trên registry webhook. Yêu cầu admin role và gateway token.
+
+> Inbound webhook yêu cầu đặt `GOCLAW_ENCRYPTION_KEY` để secret có thể lưu mã hóa lúc lưu. Xem [Biến môi trường](environment-variables.md#secrets).
+
+### Inbound Receivers
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `POST` | `/v1/webhooks/llm` | Entrypoint webhook kiểu LLM (payload tương thích OpenAI được định tuyến đến agent đã cấu hình) |
+| `POST` | `/v1/webhooks/message` | Entrypoint webhook kiểu message (gửi đến channel/chat) |
+
+Cả hai receiver yêu cầu header:
+
+| Header | Mục đích |
+|--------|---------|
+| `X-GoClaw-Webhook-Id` | UUID của webhook |
+| `X-GoClaw-Signature` | `sha256=...` HMAC của raw body dùng signing key của webhook |
+| `X-GoClaw-Timestamp` | Timestamp RFC3339 (lệch tối đa 5 phút) |
+| `Idempotency-Key` | Tùy chọn — chống gửi trùng lặp (TTL lưu trong `webhook_calls`) |
+
+Mode được chọn qua query string `?mode=sync|async` (mặc định `sync` cho `llm`, `async` cho `message`).
+
+### Quản trị Webhook
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `GET` | `/v1/webhooks` | Liệt kê webhook cho tenant hiện tại |
+| `POST` | `/v1/webhooks` | Tạo webhook — response có `secret` + `hmac_signing_key` dùng một lần |
+| `GET` | `/v1/webhooks/{id}` | Lấy thông tin webhook (`secret` không bao giờ trả lại sau khi tạo) |
+| `PATCH` | `/v1/webhooks/{id}` | Cập nhật các field có thể thay đổi (scopes, rate limits, allowlist, flags) |
+| `POST` | `/v1/webhooks/{id}/rotate` | Xoay vòng signing key — trả secret mới một lần |
+| `DELETE` | `/v1/webhooks/{id}` | Thu hồi webhook (soft-delete; đặt `revoked=true`) |
+
+---
+
+## MCP Bridge
+
+Mở GoClaw tools cho Claude CLI qua streamable HTTP tại `/mcp/bridge`. Chỉ lắng nghe trên localhost. Được bảo vệ bằng gateway token với context header có chữ ký HMAC.
+
+| Header | Mục đích |
+|--------|---------|
+| `X-Agent-ID` | Context agent để thực thi tool |
+| `X-User-ID` | Context user |
+| `X-Channel` | Định tuyến channel |
+| `X-Chat-ID` | Định tuyến chat |
+| `X-Peer-Kind` | `direct` hoặc `group` |
+| `X-Bridge-Sig` | Chữ ký HMAC trên tất cả context field |
+
+---
+
+## System
+
+| Method | Path | Mô tả |
+|--------|------|-------|
+| `GET` | `/health` | Health check (không cần auth) |
+| `GET` | `/v1/openapi.json` | OpenAPI 3.0 spec |
+| `GET` | `/docs` | Swagger UI |
+
+---
+
+## Dạng Response phổ biến
+
+**Thành công:**
+```json
+{ "id": "uuid", "name": "...", ... }
+```
+
+**Lỗi:**
+```json
+{
+  "error": {
+    "code": "ERR_AGENT_NOT_FOUND",
+    "message": "Agent not found. Verify the agent ID and try again."
+  }
+}
+```
+
+Error response dùng envelope chuẩn với `code` (mã lỗi machine-readable) và `message` (thông báo cho người dùng, hỗ trợ i18n).
+
+| Code | Ý nghĩa |
+|------|---------|
+| `200` | OK |
+| `201` | Created |
+| `400` | Bad request (JSON không hợp lệ, thiếu field) |
+| `401` | Unauthorized |
+| `403` | Forbidden |
+| `404` | Not found |
+| `409` | Conflict (tên trùng lặp) |
+| `429` | Rate limited |
+| `500` | Internal server error |
+
+Error message được localize theo header `Accept-Language`.
+
+---
+
+## Endpoint chỉ có trên WebSocket
+
+Các endpoint sau **chỉ có trên WebSocket RPC**, không có HTTP:
+
+- **Sessions:** Liệt kê, xem trước, patch, xóa, reset (`sessions.*`)
+- **Cron jobs:** Liệt kê, tạo, cập nhật, xóa, toggle, status, run, runs (`cron.*`)
+- **Config management:** Lấy, áp dụng, patch, schema (`config.*`)
+- **Config permissions:** Liệt kê, kiểm tra, cấp quyền, thu hồi (`config.permissions.*`)
+- **Workstations:** Liệt kê, lấy, tạo, cập nhật, xóa, test, link/unlink agent, CRUD permissions, activity (`workstations.*`)
+- **Gửi message:** Gửi đến channel (`send`)
+- **Chat:** Gửi, lịch sử, hủy, inject, trạng thái session (`chat.*`)
+- **Heartbeat:** Lấy, đặt, toggle, test, logs, checklist, targets (`heartbeat.*`)
+- **Device pairing:** Yêu cầu, duyệt, từ chối, liệt kê, thu hồi (`device.pair.*`)
+- **Exec approvals:** Liệt kê, duyệt, từ chối (`exec.approval.*`)
+- **TTS:** Trạng thái, bật, tắt, chuyển đổi, đặt provider, danh sách provider (`tts.*`)
+- **Browser automation:** Hành động, snapshot, screenshot (`browser.*`)
+- **Logs:** Theo dõi server log (`logs.tail`)
+
+> Xem [WebSocket Protocol](/websocket-protocol) để tham khảo đầy đủ method và frame format.
+
+---
+
+## Tiếp theo
+
+- [WebSocket Protocol](/websocket-protocol) — real-time RPC cho chat và agent event
+- [Config Reference](/config-reference) — schema đầy đủ `config.json`
+- [Database Schema](/database-schema) — định nghĩa bảng và quan hệ
+
+<!-- goclaw-source: cc510d92 | cập nhật: 2026-08-09 -->
